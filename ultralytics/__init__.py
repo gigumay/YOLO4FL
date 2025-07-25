@@ -12,6 +12,7 @@ from ultralytics.models import NAS, RTDETR, SAM, YOLO, YOLOE, FastSAM, YOLOWorld
 from ultralytics.utils import ASSETS, SETTINGS
 from ultralytics.utils.checks import check_yolo as checks
 from ultralytics.utils.downloads import download
+from ultralytics.nn.tasks import DetectionModel
 
 
 settings = SETTINGS
@@ -19,6 +20,7 @@ __all__ = (
     "__version__",
     "ASSETS",
     "YOLO",
+    "DetectionModel"
     "YOLOWorld",
     "YOLOE",
     "NAS",
