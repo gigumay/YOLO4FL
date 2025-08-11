@@ -74,6 +74,10 @@ class DetectionValidator(BaseValidator):
         for k in {"batch_idx", "cls", "bboxes"}:
             batch[k] = batch[k].to(self.device)
 
+        
+        batch["embds_prev"] = batch["embds_prev"].to(self.device, non_blocking=True)
+        batch["embds_glob"] = batch["embds_glob"].to(self.device, non_blocking=True)
+
         return batch
 
     def init_metrics(self, model: torch.nn.Module) -> None:

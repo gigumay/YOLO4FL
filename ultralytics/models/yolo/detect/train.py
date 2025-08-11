@@ -114,6 +114,9 @@ class DetectionTrainer(BaseTrainer):
                 ]  # new shape (stretched to gs-multiple)
                 imgs = nn.functional.interpolate(imgs, size=ns, mode="bilinear", align_corners=False)
             batch["img"] = imgs
+
+        batch["embds_prev"] = batch["embds_prev"].to(self.device, non_blocking=True)
+        batch["embds_glob"] = batch["embds_glob"].to(self.device, non_blocking=True)
         return batch
 
     def set_model_attributes(self):

@@ -46,6 +46,16 @@ def img2label_paths(img_paths: List[str]) -> List[str]:
     sa, sb = f"{os.sep}images{os.sep}", f"{os.sep}labels{os.sep}"  # /images/, /labels/ substrings
     return [sb.join(x.rsplit(sa, 1)).rsplit(".", 1)[0] + ".txt" for x in img_paths]
 
+def img2prevEmbd_paths(img_paths):
+    """Define label paths as a function of image paths."""
+    sa, sb = f"{os.sep}images{os.sep}", f"{os.sep}labels{os.sep}"  # /images/, /labels/ substrings
+    return [sb.join(x.rsplit(sa, 1)).rsplit(".", 1)[0] + "_prev.npy" for x in img_paths]
+
+def img2globEmbd_paths(img_paths):
+    """Define label paths as a function of image paths."""
+    sa, sb = f"{os.sep}images{os.sep}", f"{os.sep}labels{os.sep}"  # /images/, /labels/ substrings
+    return [sb.join(x.rsplit(sa, 1)).rsplit(".", 1)[0] + "_glob.npy" for x in img_paths]
+
 
 def check_file_speeds(
     files: List[str], threshold_ms: float = 10, threshold_mb: float = 50, max_files: int = 5, prefix: str = ""

@@ -38,6 +38,8 @@ from .utils import (
     save_dataset_cache_file,
     verify_image,
     verify_image_label,
+    img2prevEmbd_paths, 
+    img2globEmbd_paths
 )
 
 # Ultralytics dataset *.cache version, >= 1.0.0 for Ultralytics YOLO models
@@ -113,6 +115,8 @@ class YOLODataset(BaseDataset):
                 iterable=zip(
                     self.im_files,
                     self.label_files,
+                    self.embds_prev,
+                    self.embds_glob,
                     repeat(self.prefix),
                     repeat(self.use_keypoints),
                     repeat(len(self.data["names"])),
@@ -122,7 +126,7 @@ class YOLODataset(BaseDataset):
                 ),
             )
             pbar = TQDM(results, desc=desc, total=total)
-            for im_file, lb, shape, segments, keypoint, nm_f, nf_f, ne_f, nc_f, msg in pbar:
+            for im_file, lb, ep, eg, shape, segments, keypoint, nm_f, nf_f, ne_f, nc_f, msg in pbar:
                 nm += nm_f
                 nf += nf_f
                 ne += ne_f
@@ -134,6 +138,8 @@ class YOLODataset(BaseDataset):
                             "shape": shape,
                             "cls": lb[:, 0:1],  # n, 1
                             "bboxes": lb[:, 1:],  # n, 4
+                            "embds_prev": ep, 
+                            "embds_glob": eg,
                             "segments": segments,
                             "keypoints": keypoint,
                             "normalized": True,
@@ -165,6 +171,8 @@ class YOLODataset(BaseDataset):
             (List[dict]): List of label dictionaries, each containing information about an image and its annotations.
         """
         self.label_files = img2label_paths(self.im_files)
+        self.embds_prev = img2prevEmbd_paths(self.im_files)
+        self.embds_glob = img2globEmbd_paths(self.im_files)
         cache_path = Path(self.label_files[0]).parent.with_suffix(".cache")
         try:
             cache, exists = load_dataset_cache_file(cache_path), True  # attempt to load a *.cache file
@@ -306,6 +314,8 @@ class YOLODataset(BaseDataset):
                 value = torch.nn.utils.rnn.pad_sequence(value, batch_first=True)
             if k in {"masks", "keypoints", "bboxes", "cls", "segments", "obb"}:
                 value = torch.cat(value, 0)
+            if k in ["embds_prev", "embds_glob"]:
+                value = torch.stack(value, 0)
             new_batch[k] = value
         new_batch["batch_idx"] = list(new_batch["batch_idx"])
         for i in range(len(new_batch["batch_idx"])):

@@ -2176,6 +2176,8 @@ class Format:
         h, w = img.shape[:2]
         cls = labels.pop("cls")
         instances = labels.pop("instances")
+        embds_prev = labels.pop("embds_prev")
+        embds_glob = labels.pop("embds_glob")
         instances.convert_bbox(format=self.bbox_format)
         instances.denormalize(w, h)
         nl = len(instances)
@@ -2192,6 +2194,9 @@ class Format:
         labels["img"] = self._format_img(img)
         labels["cls"] = torch.from_numpy(cls) if nl else torch.zeros(nl)
         labels["bboxes"] = torch.from_numpy(instances.bboxes) if nl else torch.zeros((nl, 4))
+        labels["embds_prev"] = torch.from_numpy(embds_prev)
+        labels["embds_glob"] = torch.from_numpy(embds_glob)
+        
         if self.return_keypoint:
             labels["keypoints"] = (
                 torch.empty(0, 3) if instances.keypoints is None else torch.from_numpy(instances.keypoints)
@@ -2572,13 +2577,13 @@ def v8_transforms(dataset, imgsz: int, hyp: IterableSimpleNamespace, stretch: bo
 
     return Compose(
         [
-            pre_transform,
-            MixUp(dataset, pre_transform=pre_transform, p=hyp.mixup),
-            CutMix(dataset, pre_transform=pre_transform, p=hyp.cutmix),
-            Albumentations(p=1.0),
-            RandomHSV(hgain=hyp.hsv_h, sgain=hyp.hsv_s, vgain=hyp.hsv_v),
-            RandomFlip(direction="vertical", p=hyp.flipud, flip_idx=flip_idx),
-            RandomFlip(direction="horizontal", p=hyp.fliplr, flip_idx=flip_idx),
+            #pre_transform,
+            #MixUp(dataset, pre_transform=pre_transform, p=hyp.mixup),
+            #CutMix(dataset, pre_transform=pre_transform, p=hyp.cutmix),
+            #Albumentations(p=1.0),
+            #RandomHSV(hgain=hyp.hsv_h, sgain=hyp.hsv_s, vgain=hyp.hsv_v),
+            #RandomFlip(direction="vertical", p=hyp.flipud, flip_idx=flip_idx),
+            #RandomFlip(direction="horizontal", p=hyp.fliplr, flip_idx=flip_idx),
         ]
     )  # transforms
 

@@ -139,6 +139,28 @@ class BboxLoss(nn.Module):
         return loss_iou, loss_dfl
 
 
+class MOONLoss(nn.Module):
+    """MOON loss for federated learning as found in https://arxiv.org/abs/2103.16257"""
+    
+    def __init__(self, tau):
+        self.tau = tau
+        super().__init__()
+
+    def forward(self, embds_prev, embds_glob, embds_curr):
+        # Cosine similarities (no need to manually normalize)
+        sim_pos = F.cosine_similarity(embds_curr, embds_glob, dim=1)
+        sim_neg = F.cosine_similarity(embds_curr, embds_prev, dim=1)
+
+        # Apply temperature scaling and exponentiation
+        exp_pos = torch.exp(sim_pos / self.tau)
+        exp_neg = torch.exp(sim_neg / self.tau)
+
+        # Compute loss
+        loss = -torch.log(exp_pos / (exp_pos + exp_neg + 1e-8))  # numerical stability
+
+        return loss.mean()      # Alternatively loss.sum()
+
+
 class RotatedBboxLoss(BboxLoss):
     """Criterion class for computing training losses for rotated bounding boxes."""
 
@@ -201,6 +223,7 @@ class v8DetectionLoss:
 
         m = model.model[-1]  # Detect() module
         self.bce = nn.BCEWithLogitsLoss(reduction="none")
+        self.moon_loss = MOONLoss(h.tau_moon)
         self.hyp = h
         self.stride = m.stride  # model strides
         self.nc = m.nc  # number of classes
@@ -240,9 +263,9 @@ class v8DetectionLoss:
             # pred_dist = (pred_dist.view(b, a, c // 4, 4).softmax(2) * self.proj.type(pred_dist.dtype).view(1, 1, -1, 1)).sum(2)
         return dist2bbox(pred_dist, anchor_points, xywh=False)
 
-    def __call__(self, preds: Any, batch: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
+    def __call__(self, preds: Any, batch: Dict[str, torch.Tensor], embds_curr) -> Tuple[torch.Tensor, torch.Tensor]:
         """Calculate the sum of the loss for box, cls and dfl multiplied by batch size."""
-        loss = torch.zeros(3, device=self.device)  # box, cls, dfl
+        loss = torch.zeros(4, device=self.device)  # box, cls, dfl, moon
         feats = preds[1] if isinstance(preds, tuple) else preds
         pred_distri, pred_scores = torch.cat([xi.view(feats[0].shape[0], self.no, -1) for xi in feats], 2).split(
             (self.reg_max * 4, self.nc), 1
@@ -282,6 +305,7 @@ class v8DetectionLoss:
         # Cls loss
         # loss[1] = self.varifocal_loss(pred_scores, target_scores, target_labels) / target_scores_sum  # VFL way
         loss[1] = self.bce(pred_scores, target_scores.to(dtype)).sum() / target_scores_sum  # BCE
+        loss[3] = self.moon_loss(batch["embds_prev"], batch["embds_glob"], embds_curr)
 
         # Bbox loss
         if fg_mask.sum():
@@ -293,6 +317,7 @@ class v8DetectionLoss:
         loss[0] *= self.hyp.box  # box gain
         loss[1] *= self.hyp.cls  # cls gain
         loss[2] *= self.hyp.dfl  # dfl gain
+        loss[3] *= self.hyp.moon # moon gain
 
         return loss * batch_size, loss.detach()  # loss(box, cls, dfl)
 
