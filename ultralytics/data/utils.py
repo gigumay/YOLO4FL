@@ -189,7 +189,7 @@ def verify_image(args: Tuple) -> Tuple:
 
 def verify_image_label(args: Tuple) -> List:
     """Verify one image-label pair."""
-    im_file, lb_file, prefix, keypoint, num_cls, nkpt, ndim, single_cls = args
+    im_file, lb_file, embds_prev, embds_glob, prefix, keypoint, num_cls, nkpt, ndim, single_cls = args
     # Number (missing, found, empty, corrupt), message, segments, keypoints
     nm, nf, ne, nc, msg, segments, keypoints = 0, 0, 0, 0, "", [], None
     try:
@@ -248,13 +248,28 @@ def verify_image_label(args: Tuple) -> List:
         else:
             nm = 1  # label missing
             lb = np.zeros((0, (5 + nkpt * ndim) if keypoints else 5), dtype=np.float32)
+
+        if os.path.isfile(embds_prev):
+            nf += 1
+            ep = np.load(embds_prev)
+        else:
+            nm += 1
+            raise FileNotFoundError("Missing emebddings from previous model!")
+        
+        if os.path.isfile(embds_glob):
+            nf += 1
+            eg = np.load(embds_glob)
+        else:
+            nm += 1
+            raise FileNotFoundError("Missing emebddings from global model!")
+
         if keypoint:
             keypoints = lb[:, 5:].reshape(-1, nkpt, ndim)
             if ndim == 2:
                 kpt_mask = np.where((keypoints[..., 0] < 0) | (keypoints[..., 1] < 0), 0.0, 1.0).astype(np.float32)
                 keypoints = np.concatenate([keypoints, kpt_mask[..., None]], axis=-1)  # (nl, nkpt, 3)
         lb = lb[:, :5]
-        return im_file, lb, shape, segments, keypoints, nm, nf, ne, nc, msg
+        return im_file, lb, ep, eg, shape, segments, keypoints, nm, nf, ne, nc, msg
     except Exception as e:
         nc = 1
         msg = f"{prefix}{im_file}: ignoring corrupt image/label: {e}"

@@ -182,9 +182,11 @@ class BaseModel(torch.nn.Module):
             if visualize:
                 feature_visualization(x, m.type, m.i, save_dir=visualize)
             if m.i in embed:
-                embeddings.append(torch.nn.functional.adaptive_avg_pool2d(x, (1, 1)).squeeze(-1).squeeze(-1))  # flatten
+                # embeddings.append(torch.nn.functional.adaptive_avg_pool2d(x, (1, 1)).squeeze(-1).squeeze(-1))  # flatten
+                embeddings.append(x)
                 if m.i == max_idx:
-                    return torch.unbind(torch.cat(embeddings, 1), dim=0)
+                    # return torch.unbind(torch.cat(embeddings, 1), dim=0)
+                    return embeddings
         return x
 
     def _predict_augment(self, x):
