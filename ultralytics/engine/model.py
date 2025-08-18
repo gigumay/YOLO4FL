@@ -795,6 +795,10 @@ class Model(torch.nn.Module):
             self.trainer.model = self.trainer.get_model(weights=self.model if self.ckpt else None, cfg=self.model.yaml)
             self.model = self.trainer.model
 
+        if kwargs.get("state") is not None:
+            state = torch.load(kwargs["state"])
+            self.trainer.model.load_state_dict(state, strict=True)
+
         self.trainer.hub_session = self.session  # attach optional HUB session
         self.trainer.train()
         # Update model and cfg after training
