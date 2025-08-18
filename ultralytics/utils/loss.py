@@ -202,6 +202,7 @@ class v8DetectionLoss:
         m = model.model[-1]  # Detect() module
         self.bce = nn.BCEWithLogitsLoss(reduction="none")
         self.hyp = h
+        self.proto = torch.load(self.hyp.proto)
         self.stride = m.stride  # model strides
         self.nc = m.nc  # number of classes
         self.no = m.nc + m.reg_max * 4
