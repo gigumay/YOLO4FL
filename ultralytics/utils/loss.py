@@ -8,6 +8,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from typing import Union
+from collections import OrderedDict
 
 from ultralytics.utils.metrics import OKS_SIGMA
 from ultralytics.utils.ops import crop_mask, xywh2xyxy, xyxy2xywh
@@ -267,23 +268,33 @@ class v8DetectionLoss:
             # pred_dist = (pred_dist.view(b, a, c // 4, 4).softmax(2) * self.proj.type(pred_dist.dtype).view(1, 1, -1, 1)).sum(2)
         return dist2bbox(pred_dist, anchor_points, xywh=False)
     
-    def extract_obj_features(self, embds: list, 
-                             gt_bboxes: torch.Tensor, 
-                             roi_size: Union[int, tuple[int], list[int]] = 7, 
-                             sampling_ratio: int = 2, 
-                             canonical_scale: int = 50, 
-                             canonical_level: int=3, 
-                             img_size: tuple = (640, 640)):
+
+
+    def extract_obj_features(self, embds: list, gt_bboxes: torch.Tensor, img_size: tuple = (640, 640)):
+        """Extract object features from the neck output feature maps (P3-P5). Uses multi scale RoI alignment."""
         
-        """
-        Extract object features from the neck output feature maps (P3-P5). Uses multi scale RoI alignment. Reasoning behind the default
-        param values: 
+        bs, _, _ = gt_bboxes.shape
+
+        # torchvision expects dict of features: {level_name: tensor}
+        # Feature maps must be (N, C, H, W), so permute from (N, H, W, C)
+        maps = {
+            f"P{i+3}": fm.permute(0, 3, 1, 2)   # (N, C, H, W)
+            for i, fm in enumerate(embds)
+        }
+
+        # MultiScaleRoIAlign requires a list of boxes per image. We filter out zerom rows
+        box_list = [gt_bboxes[i][(gt_bboxes[i] != 0).any(dim=1)] for i in range(bs)]
+
+        obj_features = self.msa.forward(x=maps, boxes=box_list, image_shapes=[img_size])
+
+        return obj_features        
+
             
-        """
 
 
-
-        pass
+        #TODO: Ask Copilot if method can be optimized
+        #TODO: Make sure everything here is cool with gradients and stuff
+        #TODO: make sure gt coords are in absolute image values and not relative! And that they are in x1y1x2y2
 
 
     def __call__(self, preds: Any, embds: list, batch: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
