@@ -100,7 +100,7 @@ warmup_bias_lr: 0.1 # (float) warmup initial bias lr
 box: 7.5 # (float) box loss gain
 cls: 0.5 # (float) cls loss gain (scale with pixels)
 dfl: 1.5 # (float) dfl loss gain
-fpl: 2.0 # (float) FedProto loss gain
+ptl: 2.0 # (float) Prototype loss gain
 pose: 12.0 # (float) pose loss gain
 kobj: 1.0 # (float) keypoint obj loss gain
 nbs: 64 # (int) nominal batch size
@@ -122,6 +122,20 @@ copy_paste: 0.0 # (float) segment copy-paste (probability)
 copy_paste_mode: "flip" # (str) the method to do copy_paste augmentation (flip, mixup)
 auto_augment: randaugment # (str) auto augmentation policy for classification (randaugment, autoaugment, augmix)
 erasing: 0.4 # (float) probability of random erasing during classification training (0-0.9), 0 means no erasing, must be less than 1.0.
+
+# MultiScaleRoIAligner settings ----------------------------------------------------------------------------------------
+msa_out_size: 7 # (int) object feature map size 
+msa_sampling_ratio: 2 # (int) sampling ratio for RoI alignment
+msa_canonical_level: 3 # (int) FPN level objects of size canonical_scale x canonical_scale should be pooled from
+msa_canonical_scale: 50 # (int) canonical scale
+# Logic behind default values: 
+  # msa_output_size: 7 is used in R-CNN models and seems to be the default.
+  # msa_sampling_ratio: Also a common default. Higher value lead to increased computation and (according to ChatGPT) is only 
+    # beneficial when high-res feature maps are available (not our case given the small objects)
+  # msa_canonical_scale: In the AED, the avg. box size is 50 pixels
+  # msa_canonical_level: P3 is 80x80, so 1/8 of the input size. 50/8 is 6.25, so almost seven. Mapping a 50 px object 
+    # to P3 will therefore require only minimal upsampling through the RoI align mechanism, It therefore makes sense to 
+    # map 50 px objects to P3.
 
 # Custom config.yaml ---------------------------------------------------------------------------------------------------
 cfg: # (str, optional) for overriding defaults.yaml

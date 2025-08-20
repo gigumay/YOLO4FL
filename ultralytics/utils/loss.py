@@ -198,38 +198,22 @@ class KeypointLoss(nn.Module):
 class v8DetectionLoss:
     """Criterion class for computing training losses for YOLOv8 object detection."""
 
-    def __init__(self, 
-                 model, 
-                 tal_topk: int = 10, 
-                 msa_featmap_names: list = ["P3", "P4", "P5"],
-                 msa_output_size:  Union[int, tuple[int], list[int]] = 7, 
-                 msa_sampling_ratio: int = 2, 
-                 msa_canonical_level: int = 3, 
-                 msa_canonical_scale: int = 50):  # model must be de-paralleled
+    def __init__(self, model, tal_topk: int = 10, msa_featmap_names: list = ["P3", "P4", "P5"]): 
         """Initialize v8DetectionLoss with model parameters and task-aligned assignment settings. Also initializes a
-        MultiScaleRoIAlign object for object feature extraction. We apply the following reasoning to the default
-        parameter choice:
-        -msa_featmap_names: We use P3-P5 as output by the neck to extract object features.
-        - msa_output_size: 7 is used in R-CNN models and seems to be the default.
-        - msa_sampling_ratio: Also a common default. Higher value lead to increased computation and (according to ChatGPT) is only 
-        beneficial when high-res feature maps are available (not our case given the small objects)
-        - msa_canonical_scale: In the AED, the avg. box size is 50 pixels
-        - msa_canonical_level: P3 is 80x80, so 1/8 of the input size. 50/8 is 6.25, so almost seven. Mapping a 50 px object 
-        to P3 will therefore require only minimal upsampling through the RoI align mechanism, It therefore makes sense to 
-        map 50 px objects to P3.
-        """
+        MultiScaleRoIAlign object for object feature extraction."""
+         # model must be de-paralleled
         device = next(model.parameters()).device  # get model device
         h = model.args  # hyperparameters
         m = model.model[-1]  # Detect() module
         self.bce = nn.BCEWithLogitsLoss(reduction="none")
-        self.fpl = nn.MSELoss(reduction="mean")     # FedProto loss
-        self.msa = torchvision.ops.MultiScaleRoIAlign(featmap_names=msa_featmap_names, 
-                                                      output_size=msa_output_size,
-                                                      sampling_ratio=msa_sampling_ratio,
-                                                      canonical_scale=msa_canonical_scale, 
-                                                      msa_canonical_scale=msa_canonical_scale) 
+        self.ptl = nn.MSELoss(reduction="mean")     # Protoype loss
         self.hyp = h
-        #self.proto_global = torch.load(self.hyp.proto_global)
+        self.msa = torchvision.ops.MultiScaleRoIAlign(featmap_names=msa_featmap_names, 
+                                                      output_size=self.hyp.msa_out_size,
+                                                      sampling_ratio=self.hyp.msa_sampling_ratio,
+                                                      canonical_scale=self.hyp.msa_canonical_scale, 
+                                                      canonical_level=self.hyp.msa_canonical_level) 
+        self.proto_global = torch.load(self.hyp.proto_global)
         self.stride = m.stride  # model strides
         self.nc = m.nc  # number of classes
         self.no = m.nc + m.reg_max * 4
@@ -274,32 +258,18 @@ class v8DetectionLoss:
         """Extract object features from the neck output feature maps (P3-P5). Uses multi scale RoI alignment."""
         
         bs, _, _ = gt_bboxes.shape
-
-        # torchvision expects dict of features: {level_name: tensor}
-        # Feature maps must be (N, C, H, W), so permute from (N, H, W, C)
-        maps = {
-            f"P{i+3}": fm.permute(0, 3, 1, 2)   # (N, C, H, W)
-            for i, fm in enumerate(embds)
-        }
-
-        # MultiScaleRoIAlign requires a list of boxes per image. We filter out zerom rows
+        maps = OrderedDict({f"P{i+3}": fm for i, fm in enumerate(embds)})
+        # MultiScaleRoIAlign requires a list of boxes per image. Also, remove zero rows.
         box_list = [gt_bboxes[i][(gt_bboxes[i] != 0).any(dim=1)] for i in range(bs)]
-
         obj_features = self.msa.forward(x=maps, boxes=box_list, image_shapes=[img_size])
 
         return obj_features        
 
-            
-
-
-        #TODO: Ask Copilot if method can be optimized
-        #TODO: Make sure everything here is cool with gradients and stuff
-        #TODO: make sure gt coords are in absolute image values and not relative! And that they are in x1y1x2y2
 
 
     def __call__(self, preds: Any, embds: list, batch: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
         """Calculate the sum of the loss for box, cls and dfl multiplied by batch size."""
-        loss = torch.zeros(4, device=self.device)  # box, cls, dfl,fpl
+        loss = torch.zeros(4, device=self.device)  # box, cls, dfl, ptl
         feats = preds[1] if isinstance(preds, tuple) else preds
         pred_distri, pred_scores = torch.cat([xi.view(feats[0].shape[0], self.no, -1) for xi in feats], 2).split(
             (self.reg_max * 4, self.nc), 1
@@ -347,14 +317,15 @@ class v8DetectionLoss:
                 pred_distri, pred_bboxes, anchor_points, target_bboxes, target_scores, target_scores_sum, fg_mask
             )
 
-        #TODO: Aggregate protoypes into local protoype
-        #proto_local = None
-        #loss[3] = self.fpl(proto_local, self.proto_global)
+        # Protoype loss
+        obj_features = self.extract_obj_features(embds=embds, gt_bboxes=gt_bboxes)
+        proto_local = obj_features.mean(dim=0)
+        loss[3] = self.ptl(proto_local, self.proto_global)
 
         loss[0] *= self.hyp.box  # box gain
         loss[1] *= self.hyp.cls  # cls gain
         loss[2] *= self.hyp.dfl  # dfl gain
-        #loss[3] *- self.hyp.fpl  # fpl gain
+        loss[3] *- self.hyp.ptl  # ptl gain
 
         return loss * batch_size, loss.detach()  # loss(box, cls, dfl)
 
