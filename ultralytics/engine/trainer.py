@@ -405,10 +405,8 @@ class BaseTrainer:
                     batch = self.preprocess_batch(batch)
                     loss, self.loss_items = self.model(batch)
                     
-                    # zero out prototype loss in first epoch
-                    if epoch == self.start_epoch:
-                        # sanity check: zeroing out prototype loss when rrsuming training may be undesirable 
-                        assert not self.args.resume, "Zeroing out prototype loss in resumed training. Are you sure? :)"
+                    if not self.args.align_prototypes:
+                        # zero out prototype loss
                         loss[3] = 0
                         self.loss_items[3] = 0
 
