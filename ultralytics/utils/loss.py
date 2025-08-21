@@ -327,7 +327,7 @@ class v8DetectionLoss:
         loss[2] *= self.hyp.dfl  # dfl gain
         loss[3] *- self.hyp.ptl  # ptl gain
 
-        return loss * batch_size, loss.detach()  # loss(box, cls, dfl)
+        return loss * batch_size, loss.detach(), proto_local  # loss(box, cls, dfl)
 
 
 class v8SegmentationLoss(v8DetectionLoss):

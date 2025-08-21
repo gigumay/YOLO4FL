@@ -116,6 +116,7 @@ class Model(torch.nn.Module):
         self.predictor = None  # reuse predictor
         self.model = None  # model object
         self.trainer = None  # trainer object
+        self.proto_local = None # local prototype
         self.ckpt = {}  # if loaded from *.pt
         self.cfg = None  # if loaded from *.yaml
         self.ckpt_path = None
