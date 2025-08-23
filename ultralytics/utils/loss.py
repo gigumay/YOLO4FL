@@ -207,7 +207,7 @@ class v8DetectionLoss:
         m = model.model[-1]  # Detect() module
         self.bce = nn.BCEWithLogitsLoss(reduction="none")
         self.hyp = h
-        self.ptl = nn.MSELoss(reduction="mean") if self.hyp.distance_metric == "l2" else nn.CosineSimilarity(dim=0)    # Protoype loss
+        self.ptl = nn.MSELoss(reduction="mean") if self.hyp.distance_metric == "l2" else nn.CosineSimilarity(dim=0)    # Prototype loss
         self.msa = torchvision.ops.MultiScaleRoIAlign(featmap_names=msa_featmap_names, 
                                                       output_size=self.hyp.msa_out_size,
                                                       sampling_ratio=self.hyp.msa_sampling_ratio,
@@ -267,7 +267,7 @@ class v8DetectionLoss:
 
 
 
-    def __call__(self, preds: Any, embds: list, batch: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
+    def __call__(self, preds: Any, embds: list, batch: Dict[str, torch.Tensor], ignore_pt: bool = False) -> Tuple[torch.Tensor, torch.Tensor]:
         """Calculate the sum of the loss for box, cls and dfl multiplied by batch size."""
         loss = torch.zeros(4, device=self.device)  # box, cls, dfl, ptl
         feats = preds[1] if isinstance(preds, tuple) else preds
@@ -317,7 +317,7 @@ class v8DetectionLoss:
                 pred_distri, pred_bboxes, anchor_points, target_bboxes, target_scores, target_scores_sum, fg_mask
             )
 
-        # Protoype loss
+        # Prototype loss
         if self.hyp.isolate_objects:
             obj_features = self.extract_obj_features(embds=embds, gt_bboxes=gt_bboxes)
             proto_local = obj_features.mean(dim=0)
@@ -327,13 +327,23 @@ class v8DetectionLoss:
         # flatten if specified OR if cosine similarity is used!
         if self.hyp.flatten_prototypes or self.hyp.distance_metric == "cosine": 
             proto_local = torch.nn.functional.adaptive_avg_pool2d(proto_local, (1, 1)).squeeze(-1).squeeze(-1)
-
-        loss[3] = self.ptl(proto_local, self.proto_global)
+       
+        if not ignore_pt:
+            """
+            During validation, the neck output feature maps have different spatial dimensions compared to what is the case during
+            training. In that case, and if I am alignign using the full feature maps withotu flattening, the local and global 
+            prototyp mismatch in dimension, so I cannot compute the prototype loss. I am using this parameter so that this can only 
+            happen during validation. Say, for example I would add an if-clause or a try-except block, then I would not know for sure 
+            why it happens which could introduce a silent bug. 
+            """ 
+            loss[3] = self.ptl(proto_local, self.proto_global) if self.hyp.distance_metric == "l2" else 1 - self.ptl(proto_local, self.proto_global)
+        else: 
+            loss[3] = 0
 
         loss[0] *= self.hyp.box  # box gain
         loss[1] *= self.hyp.cls  # cls gain
         loss[2] *= self.hyp.dfl  # dfl gain
-        loss[3] *- self.hyp.ptl  # ptl gain
+        loss[3] *= self.hyp.ptl  # ptl gain
 
         return loss * batch_size, loss.detach(), proto_local  # loss(box, cls, dfl)
 

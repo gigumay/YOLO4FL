@@ -128,7 +128,7 @@ erasing: 0.4 # (float) probability of random erasing during classification train
 ptl: 2.0 # (float) Prototype loss gain
 isolate_objects: True # (bool) whether to align using only object features. If False, the entire layer #22 is used
 distance_metric: "l2" # (string) metric used to calculate prototype distance. Alternative is "cosine". 
-flatten_protoypes: False # (bool) if True, spatial dimensions are removed from prototypes. Always True when cosine similarity is used
+flatten_prototypes: False # (bool) if True, spatial dimensions are removed from prototypes. Always True when cosine similarity is used
 
 
 # MultiScaleRoIAligner settings ----------------------------------------------------------------------------------------
