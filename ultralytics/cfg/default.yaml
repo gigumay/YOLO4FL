@@ -101,7 +101,6 @@ warmup_bias_lr: 0.1 # (float) warmup initial bias lr
 box: 7.5 # (float) box loss gain
 cls: 0.5 # (float) cls loss gain (scale with pixels)
 dfl: 1.5 # (float) dfl loss gain
-ptl: 2.0 # (float) Prototype loss gain
 pose: 12.0 # (float) pose loss gain
 kobj: 1.0 # (float) keypoint obj loss gain
 nbs: 64 # (int) nominal batch size
@@ -123,6 +122,14 @@ copy_paste: 0.0 # (float) segment copy-paste (probability)
 copy_paste_mode: "flip" # (str) the method to do copy_paste augmentation (flip, mixup)
 auto_augment: randaugment # (str) auto augmentation policy for classification (randaugment, autoaugment, augmix)
 erasing: 0.4 # (float) probability of random erasing during classification training (0-0.9), 0 means no erasing, must be less than 1.0.
+
+
+# Prototype Regularization ---------------------------------------------------------------------------------------------
+ptl: 2.0 # (float) Prototype loss gain
+isolate_objects: True # (bool) whether to align using only object features. If False, the entire layer #22 is used
+distance_metric: "l2" # (string) metric used to calculate prototype distance. Alternative is "cosine". 
+flatten_protoypes: False # (bool) if True, spatial dimensions are removed from prototypes. Always True when cosine similarity is used
+
 
 # MultiScaleRoIAligner settings ----------------------------------------------------------------------------------------
 msa_out_size: 7 # (int) object feature map size 

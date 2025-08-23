@@ -206,8 +206,8 @@ class v8DetectionLoss:
         h = model.args  # hyperparameters
         m = model.model[-1]  # Detect() module
         self.bce = nn.BCEWithLogitsLoss(reduction="none")
-        self.ptl = nn.MSELoss(reduction="mean")     # Protoype loss
         self.hyp = h
+        self.ptl = nn.MSELoss(reduction="mean") if self.hyp.distance_metric == "l2" else nn.CosineSimilarity(dim=0)    # Protoype loss
         self.msa = torchvision.ops.MultiScaleRoIAlign(featmap_names=msa_featmap_names, 
                                                       output_size=self.hyp.msa_out_size,
                                                       sampling_ratio=self.hyp.msa_sampling_ratio,
@@ -318,8 +318,16 @@ class v8DetectionLoss:
             )
 
         # Protoype loss
-        obj_features = self.extract_obj_features(embds=embds, gt_bboxes=gt_bboxes)
-        proto_local = obj_features.mean(dim=0)
+        if self.hyp.isolate_objects:
+            obj_features = self.extract_obj_features(embds=embds, gt_bboxes=gt_bboxes)
+            proto_local = obj_features.mean(dim=0)
+        else:
+            proto_local = embds[-1].mean(dim=0)
+
+        # flatten if specified OR if cosine similarity is used!
+        if self.hyp.flatten_prototypes or self.hyp.distance_metric == "cosine": 
+            proto_local = torch.nn.functional.adaptive_avg_pool2d(proto_local, (1, 1)).squeeze(-1).squeeze(-1)
+
         loss[3] = self.ptl(proto_local, self.proto_global)
 
         loss[0] *= self.hyp.box  # box gain
