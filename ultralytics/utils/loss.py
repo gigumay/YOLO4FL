@@ -213,7 +213,7 @@ class v8DetectionLoss:
                                                       sampling_ratio=self.hyp.msa_sampling_ratio,
                                                       canonical_scale=self.hyp.msa_canonical_scale, 
                                                       canonical_level=self.hyp.msa_canonical_level) 
-        self.proto_global = torch.load(self.hyp.proto_global)
+        self.proto_global = torch.load(self.hyp.proto_global).to(device)
         self.stride = m.stride  # model strides
         self.nc = m.nc  # number of classes
         self.no = m.nc + m.reg_max * 4
