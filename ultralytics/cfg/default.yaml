@@ -9,8 +9,6 @@ mode: train # (str) YOLO mode, i.e. train, val, predict, export, track, benchmar
 # Train settings -------------------------------------------------------------------------------------------------------
 model: # (str, optional) path to model file, i.e. yolov8n.pt, yolov8n.yaml
 data: # (str, optional) path to data file, i.e. coco8.yaml
-proto_global:  # (str) path to a .pt file containing the global prototype for local trainign alignment
-align_prototypes: # (bool) whether to enforce alignment with the global prototype during training 
 epochs: 100 # (int) number of epochs to train for
 time: # (float, optional) number of hours to train for, overrides epochs if supplied
 patience: 100 # (int) epochs to wait for no observable improvement for early stopping of training
@@ -125,10 +123,13 @@ erasing: 0.4 # (float) probability of random erasing during classification train
 
 
 # Prototype Regularization ---------------------------------------------------------------------------------------------
-ptl: 2.0 # (float) Prototype loss gain
+protos_global:  # (str) path to a .pt file containing the global prototype for local trainign alignment
+align_prototypes: # (bool) whether to enforce alignment with the global prototype during training 
+ptl: 1.0 # (float) Prototype loss gain
 isolate_objects: True # (bool) whether to align using only object features. If False, the entire layer #22 is used
 distance_metric: "l2" # (string) metric used to calculate prototype distance. Alternative is "cosine". 
-flatten_prototypes: False # (bool) if True, spatial dimensions are removed from prototypes. Always True when cosine similarity is used
+flatten_prototypes: True # (bool) if True, spatial dimensions are removed from prototypes. Defaults to True when cosine similarity is used
+n_protos: 5 # (int) number of prototypes (embeddign clusters) to extract 
 
 
 # MultiScaleRoIAligner settings ----------------------------------------------------------------------------------------

@@ -18,6 +18,8 @@ from ultralytics.utils.torch_utils import autocast
 from .metrics import bbox_iou, probiou
 from .tal import bbox2dist
 
+from sklearn.cluster import KMeans
+
 
 class VarifocalLoss(nn.Module):
     """
@@ -207,13 +209,17 @@ class v8DetectionLoss:
         m = model.model[-1]  # Detect() module
         self.bce = nn.BCEWithLogitsLoss(reduction="none")
         self.hyp = h
+        assert self.hyp.distance_metric in ["l2", "cosine"], "Invalid distance metric!"
         self.ptl = nn.MSELoss(reduction="mean") if self.hyp.distance_metric == "l2" else nn.CosineSimilarity(dim=0)    # Prototype loss
-        self.msa = torchvision.ops.MultiScaleRoIAlign(featmap_names=msa_featmap_names, 
-                                                      output_size=self.hyp.msa_out_size,
-                                                      sampling_ratio=self.hyp.msa_sampling_ratio,
-                                                      canonical_scale=self.hyp.msa_canonical_scale, 
-                                                      canonical_level=self.hyp.msa_canonical_level) 
-        self.proto_global = torch.load(self.hyp.proto_global).to(device)
+        self.msa = None if not self.hyp.isolate_objects else torchvision.ops.MultiScaleRoIAlign(featmap_names=msa_featmap_names, 
+                                                                                                output_size=self.hyp.msa_out_size,
+                                                                                                sampling_ratio=self.hyp.msa_sampling_ratio,
+                                                                                                canonical_scale=self.hyp.msa_canonical_scale, 
+                                                                                                canonical_level=self.hyp.msa_canonical_level) 
+        self.global_rep = torch.load(self.hyp.protos_global).to(device)
+        if self.hyp.n_protos == 1:
+            self.global_rep = self.global_rep[0]
+        self.clustering_algrthm = None if self.hyp.n_protos == 1 else KMeans(n_clusters=self.hyp.n_protos, random_state=0)
         self.stride = m.stride  # model strides
         self.nc = m.nc  # number of classes
         self.no = m.nc + m.reg_max * 4
@@ -251,8 +257,6 @@ class v8DetectionLoss:
             # pred_dist = pred_dist.view(b, a, c // 4, 4).transpose(2,3).softmax(3).matmul(self.proj.type(pred_dist.dtype))
             # pred_dist = (pred_dist.view(b, a, c // 4, 4).softmax(2) * self.proj.type(pred_dist.dtype).view(1, 1, -1, 1)).sum(2)
         return dist2bbox(pred_dist, anchor_points, xywh=False)
-    
-
 
     def extract_obj_features(self, embds: list, gt_bboxes: torch.Tensor, img_size: tuple = (640, 640)):
         """Extract object features from the neck output feature maps (P3-P5). Uses multi scale RoI alignment."""
@@ -263,11 +267,15 @@ class v8DetectionLoss:
         box_list = [gt_bboxes[i][(gt_bboxes[i] != 0).any(dim=1)] for i in range(bs)]
         obj_features = self.msa.forward(x=maps, boxes=box_list, image_shapes=[img_size])
 
-        return obj_features        
+        return obj_features     
+
+    def flatten_features(self, features=torch.Tensor):
+        """Remove spatial dimensions from features. features must be of shape (N,C,W,H), where N is either the batch size 
+        (self.hyp.isolate_objects == False) or the number of objects in the batch (self.hyp.isolate_objects == True)"""
+        return   torch.nn.functional.adaptive_avg_pool2d(features, (1, 1)).squeeze(-1).squeeze(-1)
 
 
-
-    def __call__(self, preds: Any, embds: list, batch: Dict[str, torch.Tensor], ignore_pt: bool = False) -> Tuple[torch.Tensor, torch.Tensor]:
+    def __call__(self, preds: Any, embds: list, batch: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
         """Calculate the sum of the loss for box, cls and dfl multiplied by batch size."""
         loss = torch.zeros(4, device=self.device)  # box, cls, dfl, ptl
         feats = preds[1] if isinstance(preds, tuple) else preds
@@ -317,35 +325,40 @@ class v8DetectionLoss:
                 pred_distri, pred_bboxes, anchor_points, target_bboxes, target_scores, target_scores_sum, fg_mask
             )
 
-        # Prototype loss
-        if self.hyp.isolate_objects:
-            obj_features = self.extract_obj_features(embds=embds, gt_bboxes=gt_bboxes)
-            proto_local = obj_features.mean(dim=0)
-        else:
-            proto_local = embds[-1].mean(dim=0)
+        # extract local embeddings
+        local_features = self.extract_obj_features(embds=embds, gt_bboxes=gt_bboxes) if self.hyp.isolate_objects else embds[0]
 
-        # flatten if specified OR if cosine similarity is used!
-        if self.hyp.flatten_prototypes or self.hyp.distance_metric == "cosine": 
-            proto_local = torch.nn.functional.adaptive_avg_pool2d(proto_local, (1, 1)).squeeze(-1).squeeze(-1)
-       
-        if not ignore_pt:
-            """
-            During validation, the neck output feature maps have different spatial dimensions compared to what is the case during
-            training. In that case, and if I am alignign using the full feature maps withotu flattening, the local and global 
-            prototyp mismatch in dimension, so I cannot compute the prototype loss. I am using this parameter so that this can only 
-            happen during validation. Say, for example I would add an if-clause or a try-except block, then I would not know for sure 
-            why it happens which could introduce a silent bug. 
-            """ 
-            loss[3] = self.ptl(proto_local, self.proto_global) if self.hyp.distance_metric == "l2" else 1 - self.ptl(proto_local, self.proto_global)
-        else: 
-            loss[3] = 0
+        # flatten if required 
+        if self.hyp.flatten_prototypes or self.hyp.distance_metric == "cosine":
+            local_features = self.flatten_features(local_features)
+
+        # generate prototypes and compute loss
+        if self.hyp.n_protos == 1:
+            local_rep = local_features.mean(dim=0)
+            loss[3] = self.ptl(local_rep, self.global_rep) if self.hyp.distance_metric == "l2" else 1 - self.ptl(local_rep, self.global_rep)
+        else:
+            assert self.hyp.flatten_prototypes, "Can't cluster multi-dimensional features"
+            local_features_np = local_features.detach().cpu().numpy()
+            # cluster embeddings
+            clusters = self.clustering_algrthm.fit(local_features_np)
+            local_rep = torch.Tensor(clusters.cluster_centers_.to(self.global_rep.get_device()))
+            #local_rep.requires_grad_() # DO I NEED THIS? 
+            # Compute pairwise distances
+            dist_matrix = torch.cdist(local_rep, self.global_rep, p=2)
+            # Find nearest global cluster for each local cluster
+            assignments = dist_matrix.argmin(dim=1)
+            # Gather distances corresponding to the assignments
+            assigned_distances = dist_matrix[torch.arange(local_rep.size(0)), assignments]
+            
+            loss[3] =assigned_distances.mean()
+
 
         loss[0] *= self.hyp.box  # box gain
         loss[1] *= self.hyp.cls  # cls gain
         loss[2] *= self.hyp.dfl  # dfl gain
         loss[3] *= self.hyp.ptl  # ptl gain
 
-        return loss * batch_size, loss.detach(), proto_local  # loss(box, cls, dfl)
+        return loss * batch_size, loss.detach()  # loss(box, cls, dfl)
 
 
 class v8SegmentationLoss(v8DetectionLoss):
