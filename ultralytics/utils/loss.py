@@ -11,13 +11,12 @@ from typing import Union
 from collections import OrderedDict
 
 from ultralytics.utils.metrics import OKS_SIGMA
-from ultralytics.utils.ops import crop_mask, xywh2xyxy, xyxy2xywh
+from ultralytics.utils.ops import crop_mask, xywh2xyxy, xyxy2xywh, generate_prototypes
 from ultralytics.utils.tal import RotatedTaskAlignedAssigner, TaskAlignedAssigner, dist2bbox, dist2rbox, make_anchors
 from ultralytics.utils.torch_utils import autocast
 
 from .metrics import bbox_iou, probiou
 from .tal import bbox2dist
-
 from sklearn.cluster import KMeans
 
 
@@ -258,22 +257,6 @@ class v8DetectionLoss:
             # pred_dist = (pred_dist.view(b, a, c // 4, 4).softmax(2) * self.proj.type(pred_dist.dtype).view(1, 1, -1, 1)).sum(2)
         return dist2bbox(pred_dist, anchor_points, xywh=False)
 
-    def extract_obj_features(self, embds: list, gt_bboxes: torch.Tensor, img_size: tuple = (640, 640)):
-        """Extract object features from the neck output feature maps (P3-P5). Uses multi scale RoI alignment."""
-        
-        bs, _, _ = gt_bboxes.shape
-        maps = OrderedDict({f"P{i+3}": fm for i, fm in enumerate(embds)})
-        # MultiScaleRoIAlign requires a list of boxes per image. Also, remove zero rows.
-        box_list = [gt_bboxes[i][(gt_bboxes[i] != 0).any(dim=1)] for i in range(bs)]
-        obj_features = self.msa.forward(x=maps, boxes=box_list, image_shapes=[img_size])
-
-        return obj_features     
-
-    def flatten_features(self, features=torch.Tensor):
-        """Remove spatial dimensions from features. features must be of shape (N,C,W,H), where N is either the batch size 
-        (self.hyp.isolate_objects == False) or the number of objects in the batch (self.hyp.isolate_objects == True)"""
-        return   torch.nn.functional.adaptive_avg_pool2d(features, (1, 1)).squeeze(-1).squeeze(-1)
-
 
     def __call__(self, preds: Any, embds: list, batch: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
         """Calculate the sum of the loss for box, cls and dfl multiplied by batch size."""
@@ -325,33 +308,23 @@ class v8DetectionLoss:
                 pred_distri, pred_bboxes, anchor_points, target_bboxes, target_scores, target_scores_sum, fg_mask
             )
 
-        # extract local embeddings
-        local_features = self.extract_obj_features(embds=embds, gt_bboxes=gt_bboxes) if self.hyp.isolate_objects else embds[0]
-
-        # flatten if required 
-        if self.hyp.flatten_prototypes or self.hyp.distance_metric == "cosine":
-            local_features = self.flatten_features(local_features)
-
-        # generate prototypes and compute loss
+        # generate local protoytpes
+        local_rep = generate_prototypes(embds=embds, gt_bboxes=gt_bboxes, msa=self.msa, clustering_algrthm=self.clustering_algrthm, hyp=self.hyp)
+        local_rep.to(self.global_rep.get_device())
+        #TODO: Add requires_grad? 
+        
+        # compute prototype loss
         if self.hyp.n_protos == 1:
-            local_rep = local_features.mean(dim=0)
             loss[3] = self.ptl(local_rep, self.global_rep) if self.hyp.distance_metric == "l2" else 1 - self.ptl(local_rep, self.global_rep)
         else:
-            assert self.hyp.flatten_prototypes, "Can't cluster multi-dimensional features"
-            local_features_np = local_features.detach().cpu().numpy()
-            # cluster embeddings
-            clusters = self.clustering_algrthm.fit(local_features_np)
-            local_rep = torch.Tensor(clusters.cluster_centers_.to(self.global_rep.get_device()))
-            #local_rep.requires_grad_() # DO I NEED THIS? 
-            # Compute pairwise distances
+             # Compute pairwise distances
             dist_matrix = torch.cdist(local_rep, self.global_rep, p=2)
             # Find nearest global cluster for each local cluster
             assignments = dist_matrix.argmin(dim=1)
             # Gather distances corresponding to the assignments
             assigned_distances = dist_matrix[torch.arange(local_rep.size(0)), assignments]
-            
-            loss[3] =assigned_distances.mean()
-
+            loss[3] = assigned_distances.mean()
+           
 
         loss[0] *= self.hyp.box  # box gain
         loss[1] *= self.hyp.cls  # cls gain

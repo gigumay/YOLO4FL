@@ -117,7 +117,6 @@ class BaseTrainer:
             _callbacks (list, optional): List of callback functions.
         """
         self.args = get_cfg(cfg, overrides)
-        self.proto_local = None
         self.check_resume(overrides)
         self.device = select_device(self.args.device, self.args.batch)
         # Update "-1" devices so post-training val does not repeat search
@@ -405,7 +404,7 @@ class BaseTrainer:
                 with autocast(self.amp):
                     batch = self.preprocess_batch(batch)
                     if self.args.task == "detect":
-                        loss, self.loss_items, self.proto_local = self.model(batch)
+                        loss, self.loss_items = self.model(batch)
 
                         if not self.args.align_prototypes:
                             # zero out prototype loss

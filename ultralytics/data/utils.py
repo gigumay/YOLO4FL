@@ -10,7 +10,11 @@ from multiprocessing.pool import ThreadPool
 from pathlib import Path
 from tarfile import is_tarfile
 from typing import Any, Dict, List, Tuple, Union
+from collections import OrderedDict
+from sklearn.cluster import KMeans
 
+import torch
+import torchvision
 import cv2
 import numpy as np
 from PIL import Image, ImageOps
@@ -39,6 +43,7 @@ IMG_FORMATS = {"bmp", "dng", "jpeg", "jpg", "mpo", "png", "tif", "tiff", "webp",
 VID_FORMATS = {"asf", "avi", "gif", "m4v", "mkv", "mov", "mp4", "mpeg", "mpg", "ts", "wmv", "webm"}  # video suffixes
 PIN_MEMORY = str(os.getenv("PIN_MEMORY", not MACOS)).lower() == "true"  # global pin_memory for dataloaders
 FORMATS_HELP_MSG = f"Supported formats are:\nimages: {IMG_FORMATS}\nvideos: {VID_FORMATS}"
+
 
 
 def img2label_paths(img_paths: List[str]) -> List[str]:

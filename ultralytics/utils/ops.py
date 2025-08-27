@@ -9,7 +9,9 @@ from typing import Optional
 import cv2
 import numpy as np
 import torch
+import torchvision
 import torch.nn.functional as F
+from sklearn.cluster import KMeans
 
 from ultralytics.utils import LOGGER
 from ultralytics.utils.metrics import batch_probiou
@@ -70,6 +72,46 @@ class Profile(contextlib.ContextDecorator):
         if self.cuda:
             torch.cuda.synchronize(self.device)
         return time.perf_counter()
+    
+
+
+
+def extract_obj_features(embds: list, gt_bboxes: torch.Tensor, msa: torchvision.ops.MultiScaleRoIAlign, img_size: tuple = (640, 640)):
+    """Extract object features from the neck output feature maps (P3-P5). Uses multi scale RoI alignment."""
+    bs, _, _ = gt_bboxes.shape
+    maps = OrderedDict({f"P{i+3}": fm for i, fm in enumerate(embds)})
+    # MultiScaleRoIAlign requires a list of boxes per image. Also, remove zero rows.
+    box_list = [gt_bboxes[i][(gt_bboxes[i] != 0).any(dim=1)] for i in range(bs)]
+    obj_features = msa.forward(x=maps, boxes=box_list, image_shapes=[img_size])
+
+    return obj_features  
+
+
+def flatten_features( features=torch.Tensor):
+    """Remove spatial dimensions from features. features must be of shape (N,C,W,H)"""
+    return   torch.nn.functional.adaptive_avg_pool2d(features, (1, 1)).squeeze(-1).squeeze(-1)
+
+
+def generate_prototypes(embds:list, gt_bboxes: torch.Tensor, msa: torchvision.ops.MultiScaleRoIAlign, clustering_algrthm: KMeans, hyp: dict):
+    """Generate prototypes from embeddings"""
+    local_features = extract_obj_features(embds=embds, gt_bboxes=gt_bboxes) if hyp.isolate_objects else embds[0]
+
+    # flatten if required 
+    if hyp.latten or hyp.distance_metric == "cosine":
+        local_features = flatten_features(local_features)
+
+    # generate prototypes
+    if hyp.n_protos == 1:
+        local_rep = local_features.mean(dim=0)
+    else:
+        assert hyp.flatten, "Can't cluster multi-dimensional features"
+        local_features_np = local_features.detach().cpu().numpy()
+        # cluster embeddings
+        clusters = clustering_algrthm.fit(local_features_np)
+        local_rep = torch.Tensor(clusters.cluster_centers_)
+    
+    return local_rep
+
 
 
 def segment2box(segment, width: int = 640, height: int = 640):
