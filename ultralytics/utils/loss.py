@@ -11,7 +11,7 @@ from typing import Union
 from collections import OrderedDict
 
 from ultralytics.utils.metrics import OKS_SIGMA
-from ultralytics.utils.ops import crop_mask, xywh2xyxy, xyxy2xywh, generate_prototypes
+from ultralytics.utils.ops import crop_mask, xywh2xyxy, xyxy2xywh, generate_local_rep
 from ultralytics.utils.tal import RotatedTaskAlignedAssigner, TaskAlignedAssigner, dist2bbox, dist2rbox, make_anchors
 from ultralytics.utils.torch_utils import autocast
 
@@ -209,16 +209,13 @@ class v8DetectionLoss:
         self.bce = nn.BCEWithLogitsLoss(reduction="none")
         self.hyp = h
         assert self.hyp.distance_metric in ["l2", "cosine"], "Invalid distance metric!"
-        self.ptl = nn.MSELoss(reduction="mean") if self.hyp.distance_metric == "l2" else nn.CosineSimilarity(dim=0)    # Prototype loss
         self.msa = None if not self.hyp.isolate_objects else torchvision.ops.MultiScaleRoIAlign(featmap_names=msa_featmap_names, 
                                                                                                 output_size=self.hyp.msa_out_size,
                                                                                                 sampling_ratio=self.hyp.msa_sampling_ratio,
                                                                                                 canonical_scale=self.hyp.msa_canonical_scale, 
-                                                                                                canonical_level=self.hyp.msa_canonical_level) 
+                                                                                                canonical_level=self.hyp.msa_canonical_level)
+        self.clustering_algrthm = None if not self.hyp.cluster_while_training else KMeans(n_clusters=self.hyp.n_protos, random_state=0)
         self.global_rep = torch.load(self.hyp.protos_global).to(device)
-        if self.hyp.n_protos == 1:
-            self.global_rep = self.global_rep[0]
-        self.clustering_algrthm = None if self.hyp.n_protos == 1 else KMeans(n_clusters=self.hyp.n_protos, random_state=0)
         self.stride = m.stride  # model strides
         self.nc = m.nc  # number of classes
         self.no = m.nc + m.reg_max * 4
@@ -309,22 +306,19 @@ class v8DetectionLoss:
             )
 
         # generate local protoytpes
-        local_rep = generate_prototypes(embds=embds, gt_bboxes=gt_bboxes, msa=self.msa, clustering_algrthm=self.clustering_algrthm, hyp=self.hyp)
-        local_rep.to(self.global_rep.get_device())
-        #TODO: Add requires_grad? 
+        local_rep = generate_local_rep(embds=embds, gt_bboxes=gt_bboxes, msa=self.msa, clustering_algrthm=self.clustering_algrthm, hyp=self.hyp)
         
-        # compute prototype loss
-        if self.hyp.n_protos == 1:
-            loss[3] = self.ptl(local_rep, self.global_rep) if self.hyp.distance_metric == "l2" else 1 - self.ptl(local_rep, self.global_rep)
-        else:
-             # Compute pairwise distances
+        if self.hyp.distance_metric == "l2":
+            # Compute pairwise distances
             dist_matrix = torch.cdist(local_rep, self.global_rep, p=2)
             # Find nearest global cluster for each local cluster
             assignments = dist_matrix.argmin(dim=1)
             # Gather distances corresponding to the assignments
             assigned_distances = dist_matrix[torch.arange(local_rep.size(0)), assignments]
             loss[3] = assigned_distances.mean()
-           
+        else:
+            raise NotImplementedError("Currently only L2 distance is supported.")
+        
 
         loss[0] *= self.hyp.box  # box gain
         loss[1] *= self.hyp.cls  # cls gain

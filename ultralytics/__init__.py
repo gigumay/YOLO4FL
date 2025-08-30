@@ -13,6 +13,7 @@ from ultralytics.utils import ASSETS, SETTINGS
 from ultralytics.utils.checks import check_yolo as checks
 from ultralytics.utils.downloads import download
 from ultralytics.nn.tasks import DetectionModel
+from ultralytics.utils.ops import generate_local_rep
 
 
 settings = SETTINGS
@@ -30,4 +31,5 @@ __all__ = (
     "checks",
     "download",
     "settings",
+    "generate_local_rep"
 )

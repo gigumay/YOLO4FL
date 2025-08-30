@@ -11,6 +11,7 @@ import numpy as np
 import torch
 import torchvision
 import torch.nn.functional as F
+from typing import OrderedDict
 from sklearn.cluster import KMeans
 
 from ultralytics.utils import LOGGER
@@ -89,27 +90,35 @@ def extract_obj_features(embds: list, gt_bboxes: torch.Tensor, msa: torchvision.
 
 def flatten_features( features=torch.Tensor):
     """Remove spatial dimensions from features. features must be of shape (N,C,W,H)"""
-    return   torch.nn.functional.adaptive_avg_pool2d(features, (1, 1)).squeeze(-1).squeeze(-1)
+    features_flattened =  torch.nn.functional.adaptive_avg_pool2d(features, (1, 1)).squeeze(-1).squeeze(-1)
+    return  features_flattened
 
 
-def generate_prototypes(embds:list, gt_bboxes: torch.Tensor, msa: torchvision.ops.MultiScaleRoIAlign, clustering_algrthm: KMeans, hyp: dict):
+def generate_local_rep(embds:list, 
+                       hyp: dict, 
+                       gt_bboxes: torch.Tensor=None, 
+                       msa: torchvision.ops.MultiScaleRoIAlign=None, 
+                       clustering_algrthm: KMeans=None):
     """Generate prototypes from embeddings"""
-    local_features = extract_obj_features(embds=embds, gt_bboxes=gt_bboxes) if hyp.isolate_objects else embds[0]
+    local_features = extract_obj_features(embds=embds, gt_bboxes=gt_bboxes, msa=msa) if hyp.isolate_objects else embds[0]
 
-    # flatten if required 
-    if hyp.latten or hyp.distance_metric == "cosine":
-        local_features = flatten_features(local_features)
+    # flatten 
+    local_features = flatten_features(local_features)
+
+    if not hyp.cluster_while_training:
+        return local_features
 
     # generate prototypes
     if hyp.n_protos == 1:
-        local_rep = local_features.mean(dim=0)
+        local_rep = local_features.mean(dim=0, keepdim=True)
     else:
-        assert hyp.flatten, "Can't cluster multi-dimensional features"
-        local_features_np = local_features.detach().cpu().numpy()
+        raise NotImplementedError("Clusteriung features during training is currently not supported!")
+        #local_features_np = local_features.detach().cpu().numpy()
         # cluster embeddings
-        clusters = clustering_algrthm.fit(local_features_np)
-        local_rep = torch.Tensor(clusters.cluster_centers_)
-    
+        #clusters = clustering_algrthm.fit(local_features_np)
+        #local_rep = torch.Tensor(clusters.cluster_centers_)
+
+    assert len(local_rep.shape) == 2, f"Unexpected output shape: {local_rep.shape}"    
     return local_rep
 
 
