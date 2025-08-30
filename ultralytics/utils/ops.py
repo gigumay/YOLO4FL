@@ -98,7 +98,8 @@ def generate_local_rep(embds:list,
                        hyp: dict, 
                        gt_bboxes: torch.Tensor=None, 
                        msa: torchvision.ops.MultiScaleRoIAlign=None, 
-                       clustering_algrthm: KMeans=None):
+                       clustering_algrthm: KMeans=None, 
+                       is_training: bool = True):
     """Generate prototypes from embeddings"""
     local_features = extract_obj_features(embds=embds, gt_bboxes=gt_bboxes, msa=msa) if hyp.isolate_objects else embds[0]
 
@@ -112,11 +113,11 @@ def generate_local_rep(embds:list,
     if hyp.n_protos == 1:
         local_rep = local_features.mean(dim=0, keepdim=True)
     else:
-        raise NotImplementedError("Clusteriung features during training is currently not supported!")
-        #local_features_np = local_features.detach().cpu().numpy()
+        assert not is_training, "CLustering while training is not supported!"
+        local_features_np = local_features.detach().cpu().numpy()
         # cluster embeddings
-        #clusters = clustering_algrthm.fit(local_features_np)
-        #local_rep = torch.Tensor(clusters.cluster_centers_)
+        clusters = clustering_algrthm.fit(local_features_np)
+        local_rep = torch.from_numpy(clusters.cluster_centers_)
 
     assert len(local_rep.shape) == 2, f"Unexpected output shape: {local_rep.shape}"    
     return local_rep
