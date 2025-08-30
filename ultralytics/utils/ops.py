@@ -122,7 +122,6 @@ def generate_local_rep(embds:list,
     return local_rep
 
 
-
 def segment2box(segment, width: int = 640, height: int = 640):
     """
     Convert segment coordinates to bounding box coordinates.

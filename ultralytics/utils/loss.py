@@ -214,7 +214,8 @@ class v8DetectionLoss:
                                                                                                 sampling_ratio=self.hyp.msa_sampling_ratio,
                                                                                                 canonical_scale=self.hyp.msa_canonical_scale, 
                                                                                                 canonical_level=self.hyp.msa_canonical_level)
-        self.clustering_algrthm = None if not self.hyp.cluster_while_training else KMeans(n_clusters=self.hyp.n_protos, random_state=0)
+        self.clustering_algrthm = KMeans(n_clusters=self.hyp.n_protos, random_state=0) if self.hyp.cluster_while_training \
+                                  and self.hyp.n_protos > 1 else None
         self.global_rep = torch.load(self.hyp.protos_global).to(device)
         self.stride = m.stride  # model strides
         self.nc = m.nc  # number of classes
