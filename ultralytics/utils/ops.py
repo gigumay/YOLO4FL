@@ -94,34 +94,38 @@ def flatten_features( features=torch.Tensor):
     return  features_flattened
 
 
-def generate_local_rep(embds:list, 
-                       hyp: dict, 
-                       gt_bboxes: torch.Tensor=None, 
-                       msa: torchvision.ops.MultiScaleRoIAlign=None, 
-                       clustering_algrthm: KMeans=None, 
-                       is_training: bool = True):
-    """Generate prototypes from embeddings"""
-    local_features = extract_obj_features(embds=embds, gt_bboxes=gt_bboxes, msa=msa) if hyp.isolate_objects else embds[0]
+def get_features(embds: list, hyp: dict, gt_bboxes: torch.Tensor=None, msa: torchvision.ops.MultiScaleRoIAlign=None):
+    features_3D = extract_obj_features(embds=embds, gt_bboxes=gt_bboxes, msa=msa) if hyp.isolate_objects else embds[0]
+    return flatten_features(features_3D)
 
-    # flatten 
-    local_features = flatten_features(local_features)
 
-    if not hyp.cluster_while_training:
-        return local_features
-
-    # generate prototypes
+def agg_features(features: torch.Tensor, hyp:dict, is_training: bool =True, clustering_algrthm: KMeans=None):
     if hyp.n_protos == 1:
-        local_rep = local_features.mean(dim=0, keepdim=True)
+        rep = features.mean(dim=0, keepdim=True)
     else:
-        assert not is_training, "CLustering while training is not supported!"
-        local_features_np = local_features.detach().cpu().numpy()
-        # cluster embeddings
-        clusters = clustering_algrthm.fit(local_features_np)
-        local_rep = torch.from_numpy(clusters.cluster_centers_)
+        assert not is_training, "Clustering during training currently not supported"
+        features_np = features.detach().cpu().numpy()
+        clusters = clustering_algrthm.fit(features_np)
+        rep = torch.from_numpy(clusters.cluster_centers_)
 
-    assert len(local_rep.shape) == 2, f"Unexpected output shape: {local_rep.shape}"    
-    return local_rep
+    assert len(rep.shape) == 2, f"Unexpected output shape: {rep.shape}"    
+    return rep
 
+
+def generate_rep(embs: list, 
+                 hyp: dict, 
+                 aggregate: bool, 
+                 is_training: bool, 
+                 gt_bboxes: torch.Tensor=None, 
+                 msa: torchvision.ops.MultiScaleRoIAlign=None,
+                 clustering_algrthm: KMeans=None):
+    features = get_features(embds=embs, hyp=hyp, gt_bboxes=gt_bboxes, msa=msa)
+
+    if not aggregate:
+        return features
+    else:
+        return agg_features(features=features, hyp=hyp, is_training=is_training, clustering_algrthm=clustering_algrthm)
+    
 
 def segment2box(segment, width: int = 640, height: int = 640):
     """

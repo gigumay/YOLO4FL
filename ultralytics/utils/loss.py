@@ -11,7 +11,7 @@ from typing import Union
 from collections import OrderedDict
 
 from ultralytics.utils.metrics import OKS_SIGMA
-from ultralytics.utils.ops import crop_mask, xywh2xyxy, xyxy2xywh, generate_local_rep
+from ultralytics.utils.ops import crop_mask, xywh2xyxy, xyxy2xywh, generate_rep
 from ultralytics.utils.tal import RotatedTaskAlignedAssigner, TaskAlignedAssigner, dist2bbox, dist2rbox, make_anchors
 from ultralytics.utils.torch_utils import autocast
 
@@ -214,8 +214,7 @@ class v8DetectionLoss:
                                                                                                 sampling_ratio=self.hyp.msa_sampling_ratio,
                                                                                                 canonical_scale=self.hyp.msa_canonical_scale, 
                                                                                                 canonical_level=self.hyp.msa_canonical_level)
-        self.clustering_algrthm = KMeans(n_clusters=self.hyp.n_protos, random_state=0) if self.hyp.cluster_while_training \
-                                  and self.hyp.n_protos > 1 else None
+        self.clustering_algrthm = None
         self.global_rep = torch.load(self.hyp.protos_global).to(device)
         self.stride = m.stride  # model strides
         self.nc = m.nc  # number of classes
@@ -306,8 +305,14 @@ class v8DetectionLoss:
                 pred_distri, pred_bboxes, anchor_points, target_bboxes, target_scores, target_scores_sum, fg_mask
             )
 
-        # generate local protoytpes
-        local_rep = generate_local_rep(embds=embds, gt_bboxes=gt_bboxes, msa=self.msa, clustering_algrthm=self.clustering_algrthm, hyp=self.hyp)
+        # generate batch representation
+        local_rep = generate_rep(embds=embds,
+                                 hyp=self.hyp, 
+                                 aggregate=self.hyp.cluster_while_training, 
+                                 is_training=True, 
+                                 gt_bboxes=gt_bboxes,
+                                 msa=self.msa,
+                                 clustering_algrthm=self.clustering_algrthm)
         
         if self.hyp.distance_metric == "l2":
             # Compute pairwise distances
