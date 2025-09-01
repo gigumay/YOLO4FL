@@ -13,7 +13,7 @@ from ultralytics.utils import ASSETS, SETTINGS
 from ultralytics.utils.checks import check_yolo as checks
 from ultralytics.utils.downloads import download
 from ultralytics.nn.tasks import DetectionModel
-from ultralytics.utils.ops import get_features, agg_features, generate_rep
+from ultralytics.utils.ops import get_features, agg_features, assign_local2global_rep
 
 
 settings = SETTINGS
@@ -32,5 +32,6 @@ __all__ = (
     "download",
     "settings",
     "get_features",
-    "agg_features"
+    "agg_features",
+    "assign_local2global_rep"
 )

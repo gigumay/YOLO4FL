@@ -11,7 +11,7 @@ from typing import Union
 from collections import OrderedDict
 
 from ultralytics.utils.metrics import OKS_SIGMA
-from ultralytics.utils.ops import crop_mask, xywh2xyxy, xyxy2xywh, generate_rep
+from ultralytics.utils.ops import crop_mask, xywh2xyxy, xyxy2xywh, generate_rep, assign_local_to_global_rep
 from ultralytics.utils.tal import RotatedTaskAlignedAssigner, TaskAlignedAssigner, dist2bbox, dist2rbox, make_anchors
 from ultralytics.utils.torch_utils import autocast
 
@@ -214,7 +214,6 @@ class v8DetectionLoss:
                                                                                                 sampling_ratio=self.hyp.msa_sampling_ratio,
                                                                                                 canonical_scale=self.hyp.msa_canonical_scale, 
                                                                                                 canonical_level=self.hyp.msa_canonical_level)
-        self.clustering_algrthm = None
         self.global_rep = torch.load(self.hyp.protos_global).to(device)
         self.stride = m.stride  # model strides
         self.nc = m.nc  # number of classes
@@ -307,21 +306,15 @@ class v8DetectionLoss:
 
         # generate batch representation
         local_rep = generate_rep(embds=embds,
-                                 hyp=self.hyp, 
-                                 aggregate=self.hyp.cluster_while_training, 
+                                 hyp=self.hyp,
+                                 aggregate=self.hyp.agg_features and self.hyp.n_protos == 1,
                                  is_training=True, 
                                  gt_bboxes=gt_bboxes,
-                                 msa=self.msa,
-                                 clustering_algrthm=self.clustering_algrthm)
+                                 msa=self.msa)
         
         if self.hyp.distance_metric == "l2":
-            # Compute pairwise distances
-            dist_matrix = torch.cdist(local_rep, self.global_rep, p=2)
-            # Find nearest global cluster for each local cluster
-            assignments = dist_matrix.argmin(dim=1)
-            # Gather distances corresponding to the assignments
-            assigned_distances = dist_matrix[torch.arange(local_rep.size(0)), assignments]
-            loss[3] = assigned_distances.mean()
+            _, distances = assign_local_to_global_rep(local_rep=local_rep, global_rep=self.global_rep, return_distances=True)
+            loss[3] = distances.mean()
         else:
             raise NotImplementedError("Currently only L2 distance is supported.")
         

@@ -73,8 +73,6 @@ class Profile(contextlib.ContextDecorator):
         if self.cuda:
             torch.cuda.synchronize(self.device)
         return time.perf_counter()
-    
-
 
 
 def extract_obj_features(embds: list, gt_bboxes: torch.Tensor, msa: torchvision.ops.MultiScaleRoIAlign, img_size: tuple = (640, 640)):
@@ -125,6 +123,32 @@ def generate_rep(embs: list,
         return features
     else:
         return agg_features(features=features, hyp=hyp, is_training=is_training, clustering_algrthm=clustering_algrthm)
+    
+
+def assign_local2global_rep(local_rep: torch.Tensor, global_rep: torch.Tensor, return_distances: bool):
+    """ Assign local representations to nearest global representation and return either the corresponding 
+    distances or the assigned local representations for each gloabl representation"""
+
+    # Pairwise distances: [n_local, n_global]
+    dist_matrix = torch.cdist(local_rep, global_rep, p=2)
+
+    # Nearest global centroid for each local
+    assignments = dist_matrix.argmin(dim=1)
+
+    if return_distances:
+        # Just the distances to assigned global
+        distances = dist_matrix[torch.arange(local_rep.shape[0]), assignments]
+        return assignments, distances
+    else:
+        # Group locals into a list of tensors
+        grouped = {idx: [] for idx in range(global_rep.shape[0])}
+        for g in range(global_rep.size(0)):
+            mask = (assignments == g)
+            if mask.any():
+                grouped[g].append(local_rep[mask])
+    
+        return assignments, grouped
+
     
 
 def segment2box(segment, width: int = 640, height: int = 640):
