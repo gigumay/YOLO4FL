@@ -123,7 +123,7 @@ erasing: 0.4 # (float) probability of random erasing during classification train
 
 
 # Prototype Regularization ---------------------------------------------------------------------------------------------
-protos_global:  # (str) path to a .pt file containing the global prototype for local trainign alignment
+global_proto:  # (str) path to a .pt file containing the global prototype for local training alignment
 align_prototypes: # (bool) whether to enforce alignment with the global prototype during training 
 ptl: 1.0 # (float) Prototype loss gain
 isolate_objects: True # (bool) whether to align using only object features. If False, the entire layer #22 is used

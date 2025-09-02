@@ -11,7 +11,7 @@ from typing import Union
 from collections import OrderedDict
 
 from ultralytics.utils.metrics import OKS_SIGMA
-from ultralytics.utils.ops import crop_mask, xywh2xyxy, xyxy2xywh, generate_rep, assign_local2global_rep
+from ultralytics.utils.ops import crop_mask, xywh2xyxy, xyxy2xywh, generate_proto, assign_local2global_proto
 from ultralytics.utils.tal import RotatedTaskAlignedAssigner, TaskAlignedAssigner, dist2bbox, dist2rbox, make_anchors
 from ultralytics.utils.torch_utils import autocast
 
@@ -214,7 +214,8 @@ class v8DetectionLoss:
                                                                                                 sampling_ratio=self.hyp.msa_sampling_ratio,
                                                                                                 canonical_scale=self.hyp.msa_canonical_scale, 
                                                                                                 canonical_level=self.hyp.msa_canonical_level)
-        self.global_rep = torch.load(self.hyp.protos_global).to(device)
+        self.global_proto = torch.load(self.hyp.global_proto).to(device)
+        assert len(self.global_proto.shape) == 2 and self.global_proto.shape[0] == self.hyp.n_protos 
         self.stride = m.stride  # model strides
         self.nc = m.nc  # number of classes
         self.no = m.nc + m.reg_max * 4
@@ -304,16 +305,17 @@ class v8DetectionLoss:
                 pred_distri, pred_bboxes, anchor_points, target_bboxes, target_scores, target_scores_sum, fg_mask
             )
 
-        # generate batch representation
-        local_rep = generate_rep(embds=embds,
-                                 hyp=self.hyp,
-                                 aggregate=self.hyp.agg_features and self.hyp.n_protos == 1,
-                                 is_training=True, 
-                                 gt_bboxes=gt_bboxes,
-                                 msa=self.msa)
+        # generate batch prototype
+        local_proto = generate_proto(embds=embds,
+                                     hyp=self.hyp,
+                                     aggregate=self.hyp.agg_features and self.hyp.n_protos == 1,
+                                     is_training=True, 
+                                     gt_bboxes=gt_bboxes,
+                                     msa=self.msa)
         
         if self.hyp.distance_metric == "l2":
-            _, distances = assign_local2global_rep(local_rep=local_rep, global_rep=self.global_rep, return_distances=True)
+            _, distances = assign_local2global_proto(local_proto=local_proto, global_proto=self.global_proto, return_distances=True)
+            assert len(distances.shape) == 1 and distances.shape[0] == local_proto.shape[0]
             loss[3] = distances.mean()
         else:
             raise NotImplementedError("Currently only L2 distance is supported.")

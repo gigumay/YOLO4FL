@@ -13,7 +13,7 @@ from ultralytics.utils import ASSETS, SETTINGS
 from ultralytics.utils.checks import check_yolo as checks
 from ultralytics.utils.downloads import download
 from ultralytics.nn.tasks import DetectionModel
-from ultralytics.utils.ops import get_features, agg_features, assign_local2global_rep, prototype_matching
+from ultralytics.utils.ops import get_features, agg_features, assign_local2global_proto, prototype_matching
 
 
 settings = SETTINGS
@@ -33,6 +33,6 @@ __all__ = (
     "settings",
     "get_features",
     "agg_features",
-    "assign_local2global_rep",
+    "assign_local2global_proto",
     "prototype_matching"
 )

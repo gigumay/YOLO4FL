@@ -10,6 +10,7 @@ import cv2
 import numpy as np
 import torch
 import torchvision
+import random
 import torch.nn.functional as F
 from typing import OrderedDict
 from sklearn.cluster import KMeans
@@ -100,24 +101,24 @@ def get_features(embds: list, hyp: dict, gt_bboxes: torch.Tensor=None, msa: torc
 
 def agg_features(features: torch.Tensor, hyp:dict, is_training: bool =True, clustering_algrthm: KMeans=None):
     if hyp.n_protos == 1:
-        rep = features.mean(dim=0, keepdim=True)
+        proto = features.mean(dim=0, keepdim=True)
     else:
         assert not is_training, "Clustering during training currently not supported"
         features_np = features.detach().cpu().numpy()
         clusters = clustering_algrthm.fit(features_np)
-        rep = torch.from_numpy(clusters.cluster_centers_)
+        proto = torch.from_numpy(clusters.cluster_centers_)
 
-    assert len(rep.shape) == 2, f"Unexpected output shape: {rep.shape}"    
-    return rep
+    assert len(proto.shape) == 2, f"Unexpected output shape: {proto.shape}"    
+    return proto
 
 
-def generate_rep(embs: list, 
-                 hyp: dict, 
-                 aggregate: bool, 
-                 is_training: bool, 
-                 gt_bboxes: torch.Tensor=None, 
-                 msa: torchvision.ops.MultiScaleRoIAlign=None,
-                 clustering_algrthm: KMeans=None):
+def generate_proto(embs: list, 
+                   hyp: dict, 
+                   aggregate: bool, 
+                   is_training: bool, 
+                   gt_bboxes: torch.Tensor=None, 
+                   msa: torchvision.ops.MultiScaleRoIAlign=None,
+                   clustering_algrthm: KMeans=None):
     features = get_features(embds=embs, hyp=hyp, gt_bboxes=gt_bboxes, msa=msa)
 
     if not aggregate:
@@ -126,32 +127,33 @@ def generate_rep(embs: list,
         return agg_features(features=features, hyp=hyp, is_training=is_training, clustering_algrthm=clustering_algrthm)
     
 
-def assign_local2global_rep(local_rep: torch.Tensor, global_rep: torch.Tensor, return_distances: bool):
-    """ Assign local representations to nearest global representation and return either the corresponding 
-    distances or the assigned local representations for each gloabl representation"""
+def assign_local2global_proto(local_proto: torch.Tensor, global_proto: torch.Tensor, return_distances: bool):
+    """ Assign local prototypes to nearest global prototype and return either the corresponding 
+    distances or the assigned local prototypes (can eb features) for each global prototype"""
 
     # Pairwise distances: [n_local, n_global]
-    dist_matrix = torch.cdist(local_rep, global_rep, p=2)
+    dist_matrix = torch.cdist(local_proto, global_proto, p=2)
 
     # Nearest global centroid for each local
     assignments = dist_matrix.argmin(dim=1)
 
     if return_distances:
-        # Just the distances to assigned global
-        distances = dist_matrix[torch.arange(local_rep.shape[0]), assignments]
+        # Just the distances to assigned global prototype
+        distances = dist_matrix[torch.arange(local_proto.shape[0]), assignments]
         return assignments, distances
     else:
         # Group locals into a list of tensors
-        grouped = {idx: [] for idx in range(global_rep.shape[0])}
-        for g in range(global_rep.size(0)):
+        grouped = {idx: [] for idx in range(global_proto.shape[0])}
+        for g in range(global_proto.size(0)):
             mask = (assignments == g)
             if mask.any():
-                grouped[g].append(local_rep[mask])
+                grouped[g].append(local_proto[mask])
     
         return assignments, grouped
     
 
 def compute_cost_matrix(self, clusters, candidates):
+    """Compute cost matrix for grouping of prototypes"""
     cm = torch.zeros((candidates.shape[0], clusters.shape[0]), dtype=torch.float32, device=candidates.device)
 
     for j in range(clusters.shape[0]):                     
@@ -162,6 +164,8 @@ def compute_cost_matrix(self, clusters, candidates):
 
 
 def prototype_matching(self, prototypes, n_orders=10):
+    """Cluster prototypes into groups of size n_protos by iteratively optimizing via Jonker-Volgenant algoithm 
+    to approximat thye global cost minimum as measured via the L2 distance"""
     best_total_cost = np.inf
     best_clusters = None
     
@@ -195,7 +199,6 @@ def prototype_matching(self, prototypes, n_orders=10):
                 best_clusters = clusters
     
     return best_clusters, best_total_cost
-
     
 
 def segment2box(segment, width: int = 640, height: int = 640):
