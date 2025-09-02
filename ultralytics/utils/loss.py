@@ -11,7 +11,7 @@ from typing import Union
 from collections import OrderedDict
 
 from ultralytics.utils.metrics import OKS_SIGMA
-from ultralytics.utils.ops import crop_mask, xywh2xyxy, xyxy2xywh, generate_rep, assign_local_to_global_rep
+from ultralytics.utils.ops import crop_mask, xywh2xyxy, xyxy2xywh, generate_rep, assign_local2global_rep
 from ultralytics.utils.tal import RotatedTaskAlignedAssigner, TaskAlignedAssigner, dist2bbox, dist2rbox, make_anchors
 from ultralytics.utils.torch_utils import autocast
 
@@ -313,7 +313,7 @@ class v8DetectionLoss:
                                  msa=self.msa)
         
         if self.hyp.distance_metric == "l2":
-            _, distances = assign_local_to_global_rep(local_rep=local_rep, global_rep=self.global_rep, return_distances=True)
+            _, distances = assign_local2global_rep(local_rep=local_rep, global_rep=self.global_rep, return_distances=True)
             loss[3] = distances.mean()
         else:
             raise NotImplementedError("Currently only L2 distance is supported.")

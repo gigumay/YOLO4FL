@@ -13,6 +13,7 @@ import torchvision
 import torch.nn.functional as F
 from typing import OrderedDict
 from sklearn.cluster import KMeans
+from scipy.optimize import linear_sum_assignment
 
 from ultralytics.utils import LOGGER
 from ultralytics.utils.metrics import batch_probiou
@@ -148,6 +149,52 @@ def assign_local2global_rep(local_rep: torch.Tensor, global_rep: torch.Tensor, r
                 grouped[g].append(local_rep[mask])
     
         return assignments, grouped
+    
+
+def compute_cost_matrix(self, clusters, candidates):
+    cm = torch.zeros((candidates.shape[0], clusters.shape[0]), dtype=torch.float32, device=candidates.device)
+
+    for j in range(clusters.shape[0]):                     
+        dists = torch.cdist(candidates, clusters[j], p=2)   
+        cm[:, j] = dists.sum(dim=1)              
+    
+    return cm
+
+
+def prototype_matching(self, prototypes, n_orders=10):
+    best_total_cost = np.inf
+    best_clusters = None
+    
+    for base_idx in range(prototypes.shape[0]):
+        base_set = prototypes[base_idx]
+        remaining_indices = [i for i in range(prototypes.shape[0]) if i != base_idx]
+        
+        for _ in range(n_orders):
+            # Shuffle the remaining sets to reduce order bias
+            random.shuffle(remaining_indices)
+            
+            clusters = torch.unsqueeze(base_set, dim=1)
+            total_cost = 0
+            
+            for idx in remaining_indices:
+                candidate_points = prototypes[idx]
+                cost_matrix = self._compute_cost_matrix(clusters, candidate_points)
+                row_ind, col_ind = linear_sum_assignment(cost_matrix.detach().cpu().numpy())
+
+                # extend clusters along "points per cluster" axis
+                new_points = torch.zeros((clusters.shape[0], 1, clusters.shape[2]), dtype=clusters.dtype, device=clusters.device)
+                clusters = torch.cat([clusters, new_points], dim=1)
+                
+                for r_idx, c_idx in zip(row_ind, col_ind):
+                    # insert new point into cluster
+                    clusters[c_idx, clusters.shape[1] - 1, :] = candidate_points[r_idx] 
+                    total_cost += cost_matrix[r_idx, c_idx]
+            
+            if total_cost < best_total_cost:
+                best_total_cost = total_cost
+                best_clusters = clusters
+    
+    return best_clusters, best_total_cost
 
     
 
