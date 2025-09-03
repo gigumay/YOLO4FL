@@ -12,6 +12,7 @@ import torch
 import torchvision
 import random
 import torch.nn.functional as F
+from types import SimpleNamespace
 from typing import OrderedDict
 from sklearn.cluster import KMeans
 from scipy.optimize import linear_sum_assignment
@@ -88,32 +89,32 @@ def extract_obj_features(embds: list, gt_bboxes: torch.Tensor, msa: torchvision.
     return obj_features  
 
 
-def flatten_features( features=torch.Tensor):
+def flatten_features(features: torch.Tensor):
     """Remove spatial dimensions from features. features must be of shape (N,C,W,H)"""
     features_flattened =  torch.nn.functional.adaptive_avg_pool2d(features, (1, 1)).squeeze(-1).squeeze(-1)
     return  features_flattened
 
 
-def get_features(embds: list, hyp: dict, gt_bboxes: torch.Tensor=None, msa: torchvision.ops.MultiScaleRoIAlign=None):
+def get_features(embds: list, hyp: SimpleNamespace, gt_bboxes: torch.Tensor=None, msa: torchvision.ops.MultiScaleRoIAlign=None):
     features_3D = extract_obj_features(embds=embds, gt_bboxes=gt_bboxes, msa=msa) if hyp.isolate_objects else embds[0]
     return flatten_features(features_3D)
 
 
-def agg_features(features: torch.Tensor, hyp:dict, is_training: bool =True, clustering_algrthm: KMeans=None):
+def agg_features(features: torch.Tensor, hyp: SimpleNamespace, is_training: bool =True, clustering_algrthm: KMeans=None):
     if hyp.n_protos == 1:
         proto = features.mean(dim=0, keepdim=True)
     else:
         assert not is_training, "Clustering during training currently not supported"
         features_np = features.detach().cpu().numpy()
         clusters = clustering_algrthm.fit(features_np)
-        proto = torch.from_numpy(clusters.cluster_centers_)
+        proto = torch.from_numpy(clusters.cluster_centers_).to(device=features.device, dtype=features.dtype)
 
     assert len(proto.shape) == 2, f"Unexpected output shape: {proto.shape}"    
     return proto
 
 
 def generate_proto(embds: list, 
-                   hyp: dict, 
+                   hyp: SimpleNamespace, 
                    aggregate: bool, 
                    is_training: bool, 
                    gt_bboxes: torch.Tensor=None, 
@@ -178,7 +179,7 @@ def prototype_matching(prototypes, n_orders=10):
             random.shuffle(remaining_indices)
             
             clusters = torch.unsqueeze(base_set, dim=1)
-            total_cost = 0
+            total_cost = 0.0
             
             for idx in remaining_indices:
                 candidate_points = prototypes[idx]
@@ -192,7 +193,7 @@ def prototype_matching(prototypes, n_orders=10):
                 for r_idx, c_idx in zip(row_ind, col_ind):
                     # insert new point into cluster
                     clusters[c_idx, clusters.shape[1] - 1, :] = candidate_points[r_idx] 
-                    total_cost += cost_matrix[r_idx, c_idx]
+                    total_cost += float(cost_matrix[r_idx, c_idx].item())
             
             if total_cost < best_total_cost:
                 best_total_cost = total_cost
