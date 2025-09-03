@@ -112,14 +112,14 @@ def agg_features(features: torch.Tensor, hyp:dict, is_training: bool =True, clus
     return proto
 
 
-def generate_proto(embs: list, 
+def generate_proto(embds: list, 
                    hyp: dict, 
                    aggregate: bool, 
                    is_training: bool, 
                    gt_bboxes: torch.Tensor=None, 
                    msa: torchvision.ops.MultiScaleRoIAlign=None,
                    clustering_algrthm: KMeans=None):
-    features = get_features(embds=embs, hyp=hyp, gt_bboxes=gt_bboxes, msa=msa)
+    features = get_features(embds=embds, hyp=hyp, gt_bboxes=gt_bboxes, msa=msa)
 
     if not aggregate:
         return features
@@ -152,7 +152,7 @@ def assign_local2global_proto(local_proto: torch.Tensor, global_proto: torch.Ten
         return assignments, grouped
     
 
-def compute_cost_matrix(self, clusters, candidates):
+def compute_cost_matrix(clusters, candidates):
     """Compute cost matrix for grouping of prototypes"""
     cm = torch.zeros((candidates.shape[0], clusters.shape[0]), dtype=torch.float32, device=candidates.device)
 
@@ -163,7 +163,7 @@ def compute_cost_matrix(self, clusters, candidates):
     return cm
 
 
-def prototype_matching(self, prototypes, n_orders=10):
+def prototype_matching(prototypes, n_orders=10):
     """Cluster prototypes into groups of size n_protos by iteratively optimizing via Jonker-Volgenant algoithm 
     to approximat thye global cost minimum as measured via the L2 distance"""
     best_total_cost = np.inf
@@ -182,7 +182,7 @@ def prototype_matching(self, prototypes, n_orders=10):
             
             for idx in remaining_indices:
                 candidate_points = prototypes[idx]
-                cost_matrix = self._compute_cost_matrix(clusters, candidate_points)
+                cost_matrix = compute_cost_matrix(clusters=clusters, candidates=candidate_points)
                 row_ind, col_ind = linear_sum_assignment(cost_matrix.detach().cpu().numpy())
 
                 # extend clusters along "points per cluster" axis
