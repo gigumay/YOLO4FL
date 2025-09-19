@@ -123,7 +123,7 @@ erasing: 0.4 # (float) probability of random erasing during classification train
 
 
 # Prototype Regularization ---------------------------------------------------------------------------------------------
-global_proto:  # (str) path to a .pt file containing the global prototype for local training alignment
+global_proto:  # (dict) dictionary mapping class id's to paths leading to a .pt file containing each class' global prototype 
 align_prototypes: # (bool) whether to enforce alignment with the global prototype during training 
 ptl: 1.0 # (float) Prototype loss gain
 isolate_objects: True # (bool) whether to align using only object features. If False, the entire layer #22 is used
@@ -137,6 +137,7 @@ msa_out_size: 7 # (int) object feature map size
 msa_sampling_ratio: 2 # (int) sampling ratio for RoI alignment
 msa_canonical_level: 3 # (int) FPN level objects of size canonical_scale x canonical_scale should be pooled from
 msa_canonical_scale: 50 # (int) canonical scale
+msa_box_padding: 0.0 # (float) box padding (fraction of box size) to add to a box before extracting the features
 # Logic behind default values: 
   # msa_output_size: 7 is used in R-CNN models and seems to be the default.
   # msa_sampling_ratio: Also a common default. Higher value lead to increased computation and (according to ChatGPT) is only 

@@ -78,15 +78,28 @@ class Profile(contextlib.ContextDecorator):
         return time.perf_counter()
 
 
-def extract_obj_features(embds: list, gt_bboxes: torch.Tensor, msa: torchvision.ops.MultiScaleRoIAlign, img_size: tuple = (640, 640)):
+def extract_obj_features(embds: list, gt_bboxes: torch.Tensor, msa: torchvision.ops.MultiScaleRoIAlign, img_size: tuple = (640, 640), box_padding: float = 0.0):
     """Extract object features from the neck output feature maps (P3-P5). Uses multi scale RoI alignment."""
     bs, _, _ = gt_bboxes.shape
     maps = OrderedDict({f"P{i+3}": fm for i, fm in enumerate(embds)})
-    # MultiScaleRoIAlign requires a list of boxes per image. Also, remove zero rows.
-    box_list = [gt_bboxes[i][(gt_bboxes[i] != 0).any(dim=1)] for i in range(bs)]
-    obj_features = msa.forward(x=maps, boxes=box_list, image_shapes=[img_size])
 
-    return obj_features  
+    if box_padding > 0:
+        widths  = gt_bboxes[:, :, 2] - gt_bboxes[:, :, 0]
+        heights = gt_bboxes[:, :, 3] - gt_bboxes[:, :, 1]
+        dw = widths * box_padding / 2
+        dh = heights * box_padding / 2
+
+        gt_bboxes = gt_bboxes.clone()
+        gt_bboxes[:, :, 0] -= dw  # x1
+        gt_bboxes[:, :, 2] += dw  # x2
+        gt_bboxes[:, :, 1] -= dh  # y1
+        gt_bboxes[:, :, 3] += dh  # y2
+        gt_bboxes = torch.clamp(gt_bboxes, min=0, max=max(img_size))
+
+    box_list = [gt_bboxes[i][(gt_bboxes[i] != 0).any(dim=1)] for i in range(bs)]
+    obj_features = msa.forward(x=maps, boxes=box_list, image_shapes=[img_size]*bs)
+
+    return obj_features
 
 
 def flatten_features(features: torch.Tensor):
@@ -96,7 +109,7 @@ def flatten_features(features: torch.Tensor):
 
 
 def get_features(embds: list, hyp: SimpleNamespace, gt_bboxes: torch.Tensor=None, msa: torchvision.ops.MultiScaleRoIAlign=None):
-    features_3D = extract_obj_features(embds=embds, gt_bboxes=gt_bboxes, msa=msa) if hyp.isolate_objects else embds[0]
+    features_3D = extract_obj_features(embds=embds, gt_bboxes=gt_bboxes, msa=msa, box_padding=hyp.msa_box_padding) if hyp.isolate_objects else embds[0]
     return flatten_features(features_3D)
 
 
