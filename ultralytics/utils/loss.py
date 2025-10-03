@@ -198,7 +198,7 @@ class KeypointLoss(nn.Module):
 
 class v8DetectionLoss:
     """Criterion class for computing training losses for YOLOv8 object detection."""
-
+    #TODO: Add negative mining into TAL (add option to not pick most confident background predictions)
     def __init__(self, model, tal_topk: int = 10, msa_featmap_names: list = ["P3", "P4", "P5"]): 
         """Initialize v8DetectionLoss with model parameters and task-aligned assignment settings. Also initializes a
         MultiScaleRoIAlign object for object feature extraction."""
@@ -214,8 +214,9 @@ class v8DetectionLoss:
                                                                                                 sampling_ratio=self.hyp.msa_sampling_ratio,
                                                                                                 canonical_scale=self.hyp.msa_canonical_scale, 
                                                                                                 canonical_level=self.hyp.msa_canonical_level)
-        self.global_proto = torch.load(self.hyp.global_proto).to(device)
-        assert len(self.global_proto.shape) == 2 and self.global_proto.shape[0] == self.hyp.n_protos 
+        self.global_protos = {k: torch.load(v).to(device) for k, v in self.hyp.proto_dict.items()}
+        for proto in self.global_protos.values():
+            assert len(proto.shape) == 2 and proto.shape[0] == self.hyp.n_protos_per_class 
         self.stride = m.stride  # model strides
         self.nc = m.nc  # number of classes
         self.no = m.nc + m.reg_max * 4
@@ -253,6 +254,24 @@ class v8DetectionLoss:
             # pred_dist = pred_dist.view(b, a, c // 4, 4).transpose(2,3).softmax(3).matmul(self.proj.type(pred_dist.dtype))
             # pred_dist = (pred_dist.view(b, a, c // 4, 4).softmax(2) * self.proj.type(pred_dist.dtype).view(1, 1, -1, 1)).sum(2)
         return dist2bbox(pred_dist, anchor_points, xywh=False)
+    
+    def sample_empty_boxes(self, gt_bboxes: torch.Tensor, pred_bboxes: torch.Tensor, pred_scores: torch.Tensor, hn_ratio: float=0.5) -> torch.Tensor:
+        # gt_bboxes shape = (batch_size, max_number of objects in batch, 4). max_number of objects in batch corresponds to the maximum number 
+        # of objects in any image in the batch. For images that contain less objects, superfluous tensor elements are zeroed out
+        # pred_bboxes shape = (batch_size, n_anchors, 4). n_anchors = summ of flattened feature map sizes (8400)
+        # pred_scores shape = (batch_size, n_anchors, 1)
+        # Sort pred boxes by scores (descending)
+        # Measure iou between gt and pred boxes
+        # Pick boxes with zero IoU with GT. Pick a total number that is equal to the number of GTs or as many as possible if there are not enough zero IoU empty boxes. 
+            # From that amount pick the specified fraction of hard negatives (hn)
+        # for each image in the batch, compute the difference between the number of GT boxes and the number of empty boxes that can be sampled
+        # for images where not enough empty boxes can be sampled, sample all the empty boxes and keep track of the deficit
+        # greedily sample the deficit from imgages that have capacity
+        # If this is not possible (not enough empty boxes in the whole batch), report deficit
+        # return empty boxes. output must be a list of length batch_size where eahc element is a 2d tensor (n_empty, 4)
+
+        
+        pass
 
 
     def __call__(self, preds: Any, embds: list, batch: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -308,7 +327,7 @@ class v8DetectionLoss:
         # generate batch prototype
         local_proto = generate_proto(embds=embds,
                                      hyp=self.hyp,
-                                     aggregate=self.hyp.agg_features and self.hyp.n_protos == 1,
+                                     aggregate=self.hyp.agg_features and self.hyp.n_protos_per_class == 1,
                                      is_training=True, 
                                      gt_bboxes=gt_bboxes,
                                      msa=self.msa)

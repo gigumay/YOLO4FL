@@ -18,7 +18,7 @@ from sklearn.cluster import KMeans
 from scipy.optimize import linear_sum_assignment
 
 from ultralytics.utils import LOGGER
-from ultralytics.utils.metrics import batch_probiou
+from ultralytics.utils.metrics import batch_probiou, box_iou
 
 
 class Profile(contextlib.ContextDecorator):
@@ -79,7 +79,17 @@ class Profile(contextlib.ContextDecorator):
 
 
 def extract_obj_features(embds: list, gt_bboxes: torch.Tensor, msa: torchvision.ops.MultiScaleRoIAlign, img_size: tuple = (640, 640), box_padding: float = 0.0):
-    """Extract object features from the neck output feature maps (P3-P5). Uses multi scale RoI alignment."""
+    """
+    Extract object features from the neck output feature maps (P3-P5). Uses multi scale RoI alignment.
+    Args:
+        embds (list):                               List of feature maps from the neck with shapes [(N,C1,W1,H1), (N,C2,W2,H2), (N,C3,W3,H3)].
+        gt_bboxes (torch.Tensor):                   Ground truth bounding boxes with shape (N, num_boxes, 4) in xyxy format.
+        msa (torchvision.ops.MultiScaleRoIAlign):   MultiScaleRoIAlign module for extracting features.
+        img_size (tuple):                           Size of the input image as (height, width).
+        box_padding (float):                        Padding factor to apply to bounding boxes (e.g., 0.1 for 10% padding).
+    Returns:
+        Extracted object features with shape (total_boxes, C, pooled_height, pooled_width). 
+    """
     bs, _, _ = gt_bboxes.shape
     maps = OrderedDict({f"P{i+3}": fm for i, fm in enumerate(embds)})
 
@@ -103,18 +113,45 @@ def extract_obj_features(embds: list, gt_bboxes: torch.Tensor, msa: torchvision.
 
 
 def flatten_features(features: torch.Tensor):
-    """Remove spatial dimensions from features. features must be of shape (N,C,W,H)"""
+    """
+    Remove spatial dimensions from features. features must be of shape (N,C,W,H)
+    Args:
+        features (torch.Tensor): Input features with shape (N, C, W, H).
+    Returns:
+        Flattened features with shape (N, C).
+    """
     features_flattened =  torch.nn.functional.adaptive_avg_pool2d(features, (1, 1)).squeeze(-1).squeeze(-1)
     return  features_flattened
 
 
 def get_features(embds: list, hyp: SimpleNamespace, gt_bboxes: torch.Tensor=None, msa: torchvision.ops.MultiScaleRoIAlign=None):
+    """
+    Extract and flatten features from the neck output feature maps (P3-P5).
+    Args:
+        embds (list):                                       List of feature maps from the neck with shapes [(N,C1,W1,H1), (N,C2,W2,H2), (N,C3,W3,H3)].
+        hyp (SimpleNamespace):                              Hyperparameters including 'isolate_objects' (bool) and 'msa_box_padding' (float).
+        gt_bboxes (torch.Tensor, optional):                 Ground truth bounding boxes with shape (N, num_boxes, 4) in xyxy format. Required 
+                                                            if 'isolate_objects' is True.
+        msa (torchvision.ops.MultiScaleRoIAlign, optional): MultiScaleRoIAlign module for extracting features. Required if 'isolate_objects' is True.
+    Returns:
+        Extracted and flattened features with shape (total_boxes, C) if 'isolate_objects' is True, otherwise (N, C).
+    """
     features_3D = extract_obj_features(embds=embds, gt_bboxes=gt_bboxes, msa=msa, box_padding=hyp.msa_box_padding) if hyp.isolate_objects else embds[0]
     return flatten_features(features_3D)
 
 
 def agg_features(features: torch.Tensor, hyp: SimpleNamespace, is_training: bool =True, clustering_algrthm: KMeans=None):
-    if hyp.n_protos == 1:
+    """
+    Aggregate features into prototypes via mean or clustering.
+    Args:
+        features (torch.Tensor):                Input features with shape (N, C).
+        hyp (SimpleNamespace):                  Hyperparameters including 'n_protos_per_class' (int).
+        is_training (bool):                     Whether the model is in training mode. Clustering is not supported during training.
+        clustering_algrthm (KMeans, optional):  Clustering algorithm instance from sklearn. Required if 'n_protos_per_class' > 1.
+    Returns:
+        Aggregated prototypes with shape (n_protos_per_class, C).
+    """
+    if hyp.n_protos_per_class == 1:
         proto = features.mean(dim=0, keepdim=True)
     else:
         assert not is_training, "Clustering during training currently not supported"
@@ -126,13 +163,22 @@ def agg_features(features: torch.Tensor, hyp: SimpleNamespace, is_training: bool
     return proto
 
 
-def generate_proto(embds: list, 
-                   hyp: SimpleNamespace, 
-                   aggregate: bool, 
-                   is_training: bool, 
-                   gt_bboxes: torch.Tensor=None, 
-                   msa: torchvision.ops.MultiScaleRoIAlign=None,
-                   clustering_algrthm: KMeans=None):
+def generate_proto(embds: list, hyp: SimpleNamespace, aggregate: bool, is_training: bool, gt_bboxes: torch.Tensor=None, 
+                   msa: torchvision.ops.MultiScaleRoIAlign=None, clustering_algrthm: KMeans=None):
+    """
+    Generate prototypes from neck output feature maps (P3-P5).
+    Args:
+        embds (list):                                       List of feature maps from the neck with shapes [(N,C1,W1,H1), (N,C2,W2,H2), (N,C3,W3,H3)].
+        hyp (SimpleNamespace):                              Hyperparameters including 'isolate_objects' (bool) and 'n_protos_per_class' (int).
+        aggregate (bool):                                   Whether to aggregate features into prototypes.
+        is_training (bool):                                 Whether the model is in training mode. Clustering is not supported during training.
+        gt_bboxes (torch.Tensor, optional):                 Ground truth bounding boxes with shape (N, num_boxes, 4) in xyxy format. Required
+                                                            if 'isolate_objects' is True.
+        msa (torchvision.ops.MultiScaleRoIAlign, optional): MultiScaleRoIAlign module for extracting features. Required if 'isolate_objects' is True.
+        clustering_algrthm (KMeans, optional):              Clustering algorithm instance from sklearn. Required if 'n_protos_per_class' > 1.
+    Returns:
+        Generated prototypes with shape (n_protos_per_class, C) if 'aggregate' is True, otherwise (total_boxes, C).
+    """
     features = get_features(embds=embds, hyp=hyp, gt_bboxes=gt_bboxes, msa=msa)
 
     if not aggregate:
@@ -142,8 +188,21 @@ def generate_proto(embds: list,
     
 
 def assign_local2global_proto(local_proto: torch.Tensor, global_proto: torch.Tensor, return_distances: bool):
-    """ Assign local prototypes to nearest global prototype and return either the corresponding 
-    distances or the assigned local prototypes (can eb features) for each global prototype"""
+    """
+    Assign local prototypes to nearest global prototype and return either the corresponding distances or 
+    the assigned local prototypes  for each global prototype.
+    Args:
+        local_proto (torch.Tensor):   Local prototypes with shape (n_local, C).
+        global_proto (torch.Tensor):  Global prototypes with shape (n_global, C).
+        return_distances (bool):      Whether to return distances to assigned global prototypes or group local prototypes.
+    Returns:
+        If 'return_distances' is True, returns:
+        - assignments (torch.Tensor): Indices of assigned global prototypes for each local prototype with shape (n_local,). 
+        - distances (torch.Tensor):   Distances to assigned global prototypes with shape (n_local,).
+        If 'return_distances' is False, returns:
+        - assignments (torch.Tensor): Indices of assigned global prototypes for each local prototype with shape (n_local,).
+        - grouped (dict):             Dictionary mapping global prototype indices to lists of local prototypes assigned to them.
+    """
 
     # Pairwise distances: [n_local, n_global]
     dist_matrix = torch.cdist(local_proto, global_proto, p=2)
@@ -167,7 +226,14 @@ def assign_local2global_proto(local_proto: torch.Tensor, global_proto: torch.Ten
     
 
 def compute_cost_matrix(clusters, candidates):
-    """Compute cost matrix for grouping of prototypes"""
+    """
+    Compute cost matrix for grouping of prototypes.
+    Args:
+        clusters (torch.Tensor):   Current clusters with shape (n_clusters, n_protos_per_class, C).
+        candidates (torch.Tensor):  Candidate prototypes to assign with shape (n_candidates, C).
+    Returns:
+        Cost matrix with shape (n_candidates, n_clusters).
+    """
     cm = torch.zeros((candidates.shape[0], clusters.shape[0]), dtype=torch.float32, device=candidates.device)
 
     for j in range(clusters.shape[0]):                     
@@ -178,8 +244,16 @@ def compute_cost_matrix(clusters, candidates):
 
 
 def prototype_matching(prototypes, n_orders=10):
-    """Cluster prototypes into groups of size n_protos by iteratively optimizing via Jonker-Volgenant algoithm 
-    to approximat thye global cost minimum as measured via the L2 distance"""
+    """
+    Cluster prototypes into groups of size n_protos_per_class by iteratively optimizing via Jonker-Volgenant algorithm 
+    to approximat the global cost minimum as measured via the L2 distance.
+    Args:
+        prototypes (torch.Tensor): Prototypes to cluster with shape (n_prototypes, C).
+        n_orders (int):            Number of random orders to try for clustering to reduce order bias.
+    Returns:
+        best_clusters (torch.Tensor):   Clustered prototypes with shape (n_clusters, n_protos_per_class, C).
+        best_total_cost (float):        Total cost associated with the best clustering.
+    """
     best_total_cost = np.inf
     best_clusters = None
     
@@ -213,6 +287,219 @@ def prototype_matching(prototypes, n_orders=10):
                 best_clusters = clusters
     
     return best_clusters, best_total_cost
+
+
+def sort_preds(pred_bboxes, pred_scores):
+    """ 
+    Sort predicted boxes by their confidence scores in descending order.
+    Args:
+        pred_bboxes (torch.Tensor): Predicted bounding boxes of shape (B, N, 4).
+        pred_scores (torch.Tensor): Confidence scores of shape (B, N, 1).
+    Returns:
+        sorted_bboxes (torch.Tensor): Sorted bounding boxes of shape (B, N, 4).
+        sorted_scores (torch.Tensor): Sorted confidence scores of shape (B, N, 1).
+    """
+    sorted_idx = pred_scores.squeeze(-1).argsort(dim=1, descending=True)
+    pred_bboxes = torch.gather(pred_bboxes, 1, sorted_idx.unsqueeze(-1).expand(-1, -1, 4))
+    pred_scores = torch.gather(pred_scores, 1, sorted_idx.unsqueeze(-1))
+    return pred_bboxes, pred_scores
+
+
+def get_empty_boxes(preds, gt, pred_scores, iou_eps):
+    """
+    Identify predicted boxes that do not overlap with any ground truth boxes (IoU < iou_eps).
+    Args:
+        preds (torch.Tensor):           Predicted bounding boxes of shape (N, 4).
+        gt (torch.Tensor):              Ground truth bounding boxes of shape (M, 4).
+        pred_scores (torch.Tensor):     Confidence scores of shape (N, 1).
+        iou_eps (float):                IoU threshold to consider a box as empty.
+    Returns:
+        empty_boxes (torch.Tensor):     Empty bounding boxes of shape (K, 4).
+        empty_scores (torch.Tensor):    Confidence scores of empty boxes of shape (K,).
+        all_empty_idx (torch.Tensor):   Indices of empty boxes in the original preds tensor of shape (K,).
+    """
+    if gt.numel() > 0:
+        ious = box_iou(preds, gt)
+        max_iou, _ = ious.max(dim=1)
+        empty_mask = max_iou < iou_eps
+    else:
+        empty_mask = torch.ones(preds.shape[0], dtype=torch.bool, device=preds.device)
+
+    empty_boxes = preds[empty_mask]
+    empty_scores = pred_scores[empty_mask].squeeze(-1)
+    all_empty_idx = torch.arange(len(empty_boxes), device=preds.device)
+    return empty_boxes, empty_scores, all_empty_idx
+
+
+def sample_from_empty(empty_boxes, empty_scores, all_empty_idx, num_gt, hn_ratio):
+    """
+    Sample empty boxes based on the number of ground truth boxes and hard negative ratio.
+    Args:
+        empty_boxes (torch.Tensor):     Empty bounding boxes of shape (K, 4).
+        empty_scores (torch.Tensor):    Confidence scores of empty boxes of shape (K,).
+        all_empty_idx (torch.Tensor):   Indices of empty boxes in the original preds tensor of shape (K,).
+        num_gt (int):                   Number of ground truth boxes.
+        hn_ratio (float):               Ratio of hard negatives to sample.
+    Returns:
+        sampled_boxes (torch.Tensor):   Sampled empty bounding boxes of shape (T, 4).
+        sel_idx (torch.Tensor):         Indices of sampled boxes in the original empty_boxes tensor of shape (T,).
+    """
+    available = empty_boxes.shape[0]
+    take = min(num_gt, available)
+
+    if take == 0:
+        return torch.empty((0, 4), device=empty_boxes.device), torch.tensor([], dtype=torch.long, device=empty_boxes.device)
+
+    hn_count = int(take * hn_ratio)
+    rn_count = take - hn_count
+
+    hn_idx = empty_scores.argsort(descending=True)[:hn_count]
+
+    mask = torch.ones(len(empty_boxes), dtype=torch.bool, device=empty_boxes.device)
+    mask[hn_idx] = False
+    remaining_idx = all_empty_idx[mask]
+
+    if rn_count > 0 and len(remaining_idx) > 0:
+        rn_idx = remaining_idx[torch.randperm(len(remaining_idx))[:rn_count]]
+    else:
+        rn_idx = torch.tensor([], dtype=torch.long, device=empty_boxes.device)
+
+    sel_idx = torch.cat([hn_idx, rn_idx]) if rn_idx.numel() > 0 else hn_idx
+    return empty_boxes[sel_idx], sel_idx
+
+
+def redistribute_deficit(capacities, total_deficit, empty_boxes_all, empty_scores_all, all_empty_idx_all, empty_boxes_per_img,
+                         selected_indices_per_img, hn_ratio):
+    """
+    Redistribute deficit of empty boxes across images with surplus.
+    Args:
+        capacities (list):                  List of tuples (b, need, avail) for images with surplus
+        total_deficit (int):                Total deficit of empty boxes across the batch.
+        empty_boxes_all (list):             List of all empty boxes per image.
+        empty_scores_all (list):            List of all empty scores per image.
+        all_empty_idx_all (list):           List of all empty indices per image.
+        empty_boxes_per_img (list):         Current list of sampled empty boxes per image.
+        selected_indices_per_img (list):    Current list of selected indices per image.
+        hn_ratio (float):                   Ratio of hard negatives to sample.
+    Returns:
+        empty_boxes_per_img (list):         Updated list of sampled empty boxes per image after redistribution."""
+    if total_deficit <= 0:
+        return empty_boxes_per_img
+
+    for b, need, avail in capacities:
+        if total_deficit <= 0:
+            break
+
+        # capacity = how many more we can take from this image
+        extra = avail - need if need > 0 else avail
+        if extra <= 0:
+            continue
+
+        to_take = min(extra, total_deficit)
+
+        empty_boxes = empty_boxes_all[b]
+        empty_scores = empty_scores_all[b]
+        all_empty_idx = all_empty_idx_all[b]
+        taken = selected_indices_per_img[b]
+
+        if taken.numel() > 0:
+            mask = torch.ones(len(empty_boxes), dtype=torch.bool, device=empty_boxes.device)
+            mask[taken] = False
+            remaining_idx = all_empty_idx[mask]
+        else:
+            remaining_idx = all_empty_idx
+
+        if len(remaining_idx) > 0:
+            remaining_scores = empty_scores[remaining_idx]
+
+            # sort by score first
+            sorted_idx = remaining_scores.argsort(descending=True)
+            sorted_remaining = remaining_idx[sorted_idx]
+
+            # split into hard negatives + random negatives
+            hn_count = int(to_take * hn_ratio)
+            rn_count = to_take - hn_count
+
+            hn_idx = sorted_remaining[:hn_count]  # top scores
+
+            remaining_after_hn = sorted_remaining[hn_count:]  # the rest
+
+            if rn_count > 0 and len(remaining_after_hn) > 0:
+                rand_perm = torch.randperm(len(remaining_after_hn), device=empty_boxes.device)
+                rn_idx = remaining_after_hn[rand_perm[:rn_count]]
+            else:
+                rn_idx = torch.tensor([], dtype=torch.long, device=empty_boxes.device)
+
+            sel_idx = torch.cat([hn_idx, rn_idx]) if rn_idx.numel() > 0 else hn_idx
+
+            # update outputs
+            empty_boxes_per_img[b] = torch.cat([empty_boxes_per_img[b], empty_boxes[sel_idx]], dim=0)
+            selected_indices_per_img[b] = torch.cat([selected_indices_per_img[b], sel_idx])
+            total_deficit -= to_take
+
+    return empty_boxes_per_img, total_deficit
+
+
+def sample_empty_boxes(gt_bboxes: torch.Tensor, pred_bboxes: torch.Tensor, pred_scores: torch.Tensor, hn_ratio: float = 0.5,
+                       iou_eps: float = 1e-6):
+    """
+    Sample empty bounding boxes for each image in the batch based on ground truth boxes and hard negative ratio.
+    Args:
+        gt_bboxes (torch.Tensor):    Ground truth bounding boxes of shape (B, M, 4).
+        pred_bboxes (torch.Tensor):  Predicted bounding boxes of shape (B, N, 4).
+        pred_scores (torch.Tensor):  Confidence scores of shape (B, N, 1).
+        hn_ratio (float):            Ratio of hard negatives to sample.
+        iou_eps (float):             IoU threshold to consider a box as empty.
+    Returns:
+        empty_boxes_per_img (list):  List of sampled empty bounding boxes per image, each of shape (T_i, 4).
+    """
+    batch_size, _, _ = pred_bboxes.shape
+
+    # Step 1: sort predictions by score
+    pred_bboxes, pred_scores = sort_preds(pred_bboxes=pred_bboxes, pred_scores=pred_scores)
+
+    # holders
+    empty_boxes_per_img = [[] for _ in range(batch_size)]
+    selected_indices_per_img = [[] for _ in range(batch_size)]
+    empty_boxes_all, empty_scores_all, all_empty_idx_all = [], [], []
+    deficits, capacities = [], []
+
+    # Step 2: process each image
+    for b in range(batch_size):
+        gt = gt_bboxes[b]
+        gt = gt[gt.sum(dim=1) > 0]  # remove padded zeros
+        num_gt = gt.shape[0]
+
+        # full empties
+        empty_boxes, empty_scores, all_empty_idx = get_empty_boxes(preds=pred_bboxes[b], gt=gt, 
+                                                                   pred_scores=pred_scores[b], iou_eps=iou_eps)
+
+        # sampled empties
+        sampled_boxes, sel_idx = sample_from_empty(empty_boxes=empty_boxes, empty_scores=empty_scores, 
+                                                   all_empty_idx=all_empty_idx, num_gt=num_gt, hn_ratio=hn_ratio)
+
+        empty_boxes_per_img[b] = sampled_boxes
+        selected_indices_per_img[b] = sel_idx
+
+        # cache full sets for redistribution
+        empty_boxes_all.append(empty_boxes)
+        empty_scores_all.append(empty_scores)
+        all_empty_idx_all.append(all_empty_idx)
+
+        # deficit/capacity bookkeeping
+        available = empty_boxes.shape[0]
+        if available < num_gt:
+            deficits.append((b, num_gt, available))
+        elif available > num_gt or num_gt == 0:
+            capacities.append((b, num_gt, available))
+
+    # Step 3: redistribute deficit across batch
+    total_deficit = sum([need - avail for _, need, avail in deficits])
+
+    return  redistribute_deficit(capacities=capacities, total_deficit=total_deficit, empty_boxes_all=empty_boxes_all, 
+                                 empty_scores_all=empty_scores_all, all_empty_idx_all=all_empty_idx_all, 
+                                 empty_boxes_per_img=empty_boxes_per_img, selected_indices_per_img=selected_indices_per_img, 
+                                 hn_ratio=hn_ratio)
     
 
 def segment2box(segment, width: int = 640, height: int = 640):
