@@ -148,7 +148,7 @@ def get_features(embds: list, hyp: SimpleNamespace, gt_bboxes: torch.Tensor=None
         if not use_background:
             features_3D = extract_obj_features(maps=maps, gt_bboxes=gt_bboxes, msa=msa, box_padding=hyp.msa_box_padding)
         else:
-            empty_boxes, deficit = sample_empty_boxes(gt_bboxes=gt_bboxes, pred_bboxes=all_preds, pred_scores=all_scores, hn_ratio=hyp.hn_ratio_bckgrnd, imgsz=hyp.imgsz)
+            empty_boxes = sample_empty_boxes(gt_bboxes=gt_bboxes, pred_bboxes=all_preds, pred_scores=all_scores, hn_ratio=hyp.hn_ratio_bckgrnd, imgsz=hyp.imgsz)
             features_3D = msa.forward(x=maps,  boxes=empty_boxes, image_shapes=[hyp.imgsz]*hyp.batch)
     
     return flatten_features(features_3D)
@@ -462,7 +462,7 @@ def redistribute_deficit(capacities, total_deficit, empty_boxes_all, empty_score
             selected_indices_per_img[b] = torch.cat([selected_indices_per_img[b], sel_idx])
             total_deficit -= to_take
 
-    return empty_boxes_per_img, total_deficit
+    return empty_boxes_per_img
 
 
 def sample_empty_boxes(gt_bboxes: torch.Tensor, pred_bboxes: torch.Tensor, pred_scores: torch.Tensor, hn_ratio: float,
@@ -523,10 +523,21 @@ def sample_empty_boxes(gt_bboxes: torch.Tensor, pred_bboxes: torch.Tensor, pred_
     # Step 3: redistribute deficit across batch
     total_deficit = sum([need - avail for _, need, avail in deficits])
 
-    return  redistribute_deficit(capacities=capacities, total_deficit=total_deficit, empty_boxes_all=empty_boxes_all, 
-                                 empty_scores_all=empty_scores_all, all_empty_idx_all=all_empty_idx_all, 
-                                 empty_boxes_per_img=empty_boxes_per_img, selected_indices_per_img=selected_indices_per_img, 
-                                 hn_ratio=hn_ratio)
+
+    empty_boxes_per_img = redistribute_deficit(capacities=capacities, total_deficit=total_deficit, empty_boxes_all=empty_boxes_all, 
+                                               empty_scores_all=empty_scores_all, all_empty_idx_all=all_empty_idx_all, 
+                                               empty_boxes_per_img=empty_boxes_per_img, selected_indices_per_img=selected_indices_per_img, 
+                                               hn_ratio=hn_ratio)
+    
+    # Sanity check
+    is_zero_row = (gt_bboxes == 0).all(dim=-1)   
+    nonzero_row = ~is_zero_row           
+    total_boxes = nonzero_row.sum()  
+    total_backgrounds = sum([eb.shape[0] for eb in empty_boxes_per_img])
+
+    if (total_boxes - total_backgrounds) / total_boxes > 0.05:
+        LOGGER.warning(f"Number of objects: {total_boxes} \t Number of background that could be sampled: {total_backgrounds}.")
+
 
     
 
