@@ -78,11 +78,11 @@ class Profile(contextlib.ContextDecorator):
         return time.perf_counter()
 
 
-def extract_obj_features(embds: list, gt_bboxes: torch.Tensor, msa: torchvision.ops.MultiScaleRoIAlign, img_size: tuple = (640, 640), box_padding: float = 0.0):
+def extract_obj_features(maps: OrderedDict, gt_bboxes: torch.Tensor, msa: torchvision.ops.MultiScaleRoIAlign, img_size: tuple = (640, 640), box_padding: float = 0.0):
     """
     Extract object features from the neck output feature maps (P3-P5). Uses multi scale RoI alignment.
     Args:
-        embds (list):                               List of feature maps from the neck with shapes [(N,C1,W1,H1), (N,C2,W2,H2), (N,C3,W3,H3)].
+        maps (OrderedDict):                         OrderedDict of feature maps from the neck with shapes {'P3': (N,C1,W1,H1), 'P4': (N,C2,W2,H2), 'P5': (N,C3,W3,H3)}.
         gt_bboxes (torch.Tensor):                   Ground truth bounding boxes with shape (N, num_boxes, 4) in xyxy format.
         msa (torchvision.ops.MultiScaleRoIAlign):   MultiScaleRoIAlign module for extracting features.
         img_size (tuple):                           Size of the input image as (height, width).
@@ -91,7 +91,6 @@ def extract_obj_features(embds: list, gt_bboxes: torch.Tensor, msa: torchvision.
         Extracted object features with shape (total_boxes, C, pooled_height, pooled_width). 
     """
     bs, _, _ = gt_bboxes.shape
-    maps = OrderedDict({f"P{i+3}": fm for i, fm in enumerate(embds)})
 
     if box_padding > 0:
         widths  = gt_bboxes[:, :, 2] - gt_bboxes[:, :, 0]
@@ -124,7 +123,8 @@ def flatten_features(features: torch.Tensor):
     return  features_flattened
 
 
-def get_features(embds: list, hyp: SimpleNamespace, gt_bboxes: torch.Tensor=None, msa: torchvision.ops.MultiScaleRoIAlign=None):
+def get_features(embds: list, hyp: SimpleNamespace, gt_bboxes: torch.Tensor=None, msa: torchvision.ops.MultiScaleRoIAlign=None, 
+                 use_background: bool=False, all_preds: torch.Tensor=None, all_scores: torch.Tensor=None):
     """
     Extract and flatten features from the neck output feature maps (P3-P5).
     Args:
@@ -133,10 +133,24 @@ def get_features(embds: list, hyp: SimpleNamespace, gt_bboxes: torch.Tensor=None
         gt_bboxes (torch.Tensor, optional):                 Ground truth bounding boxes with shape (N, num_boxes, 4) in xyxy format. Required 
                                                             if 'isolate_objects' is True.
         msa (torchvision.ops.MultiScaleRoIAlign, optional): MultiScaleRoIAlign module for extracting features. Required if 'isolate_objects' is True.
+        use_background (bool):                              Whether to extract background features.
+        all_preds (torch.Tensor, optional):                 Predicted bounding boxes with shape (bs, num_boxes, 4) in xyxy format. Required if 'use_background' is True.
+        all_scores (torch.Tensor, optional):                Confidence scores with shape (bs, num_boxes, 1). Required if 'use_background' is True.
     Returns:
         Extracted and flattened features with shape (total_boxes, C) if 'isolate_objects' is True, otherwise (N, C).
     """
-    features_3D = extract_obj_features(embds=embds, gt_bboxes=gt_bboxes, msa=msa, box_padding=hyp.msa_box_padding) if hyp.isolate_objects else embds[0]
+
+    
+    if not hyp.isolate_objects:
+        features_3D = embds[0]
+    else:
+        maps = OrderedDict({f"P{i+3}": fm for i, fm in enumerate(embds)})
+        if not use_background:
+            features_3D = extract_obj_features(maps=maps, gt_bboxes=gt_bboxes, msa=msa, box_padding=hyp.msa_box_padding)
+        else:
+            empty_boxes, deficit = sample_empty_boxes(gt_bboxes=gt_bboxes, pred_bboxes=all_preds, pred_scores=all_scores, hn_ratio=hyp.hn_ratio_bckgrnd, imgsz=hyp.imgsz)
+            features_3D = msa.forward(x=maps,  boxes=empty_boxes, image_shapes=[hyp.imgsz]*hyp.batch)
+    
     return flatten_features(features_3D)
 
 
@@ -164,7 +178,8 @@ def agg_features(features: torch.Tensor, hyp: SimpleNamespace, is_training: bool
 
 
 def generate_proto(embds: list, hyp: SimpleNamespace, aggregate: bool, is_training: bool, gt_bboxes: torch.Tensor=None, 
-                   msa: torchvision.ops.MultiScaleRoIAlign=None, clustering_algrthm: KMeans=None):
+                   msa: torchvision.ops.MultiScaleRoIAlign=None, clustering_algrthm: KMeans=None, use_background: bool=False, 
+                   all_preds: torch.Tensor=None, all_scores: torch.Tensor=None):
     """
     Generate prototypes from neck output feature maps (P3-P5).
     Args:
@@ -176,10 +191,16 @@ def generate_proto(embds: list, hyp: SimpleNamespace, aggregate: bool, is_traini
                                                             if 'isolate_objects' is True.
         msa (torchvision.ops.MultiScaleRoIAlign, optional): MultiScaleRoIAlign module for extracting features. Required if 'isolate_objects' is True.
         clustering_algrthm (KMeans, optional):              Clustering algorithm instance from sklearn. Required if 'n_protos_per_class' > 1.
+        use_background (bool):                              Whether to extract background features.
+        all_preds (torch.Tensor, optional):                 Predicted bounding boxes with shape (bs, num_boxes, 4) in xyxy format. Required if 'use_background' is True.
+        all_scores (torch.Tensor, optional):                Confidence scores with shape (bs, num_boxes, 1). Required if 'use_background' is True.
+        imgsz (int):                                        Image size.
     Returns:
         Generated prototypes with shape (n_protos_per_class, C) if 'aggregate' is True, otherwise (total_boxes, C).
     """
-    features = get_features(embds=embds, hyp=hyp, gt_bboxes=gt_bboxes, msa=msa)
+    assert not (use_background and (all_preds is None or all_scores is None)), "'all_preds' and 'all_scores' must be provided when 'use_background' is True"
+
+    features = get_features(embds=embds, hyp=hyp, gt_bboxes=gt_bboxes, msa=msa, use_background=use_background, all_preds=all_preds, all_scores=all_scores)  # (total_boxes, C) or (N, C)
 
     if not aggregate:
         return features
@@ -305,7 +326,7 @@ def sort_preds(pred_bboxes, pred_scores):
     return pred_bboxes, pred_scores
 
 
-def get_empty_boxes(preds, gt, pred_scores, iou_eps):
+def get_empty_boxes(preds, gt, pred_scores, iou_eps, imgsz):
     """
     Identify predicted boxes that do not overlap with any ground truth boxes (IoU < iou_eps).
     Args:
@@ -313,6 +334,7 @@ def get_empty_boxes(preds, gt, pred_scores, iou_eps):
         gt (torch.Tensor):              Ground truth bounding boxes of shape (M, 4).
         pred_scores (torch.Tensor):     Confidence scores of shape (N, 1).
         iou_eps (float):                IoU threshold to consider a box as empty.
+        imgsz(int):                     Image size.
     Returns:
         empty_boxes (torch.Tensor):     Empty bounding boxes of shape (K, 4).
         empty_scores (torch.Tensor):    Confidence scores of empty boxes of shape (K,).
@@ -325,8 +347,11 @@ def get_empty_boxes(preds, gt, pred_scores, iou_eps):
     else:
         empty_mask = torch.ones(preds.shape[0], dtype=torch.bool, device=preds.device)
 
-    empty_boxes = preds[empty_mask]
-    empty_scores = pred_scores[empty_mask].squeeze(-1)
+    inside_mask = ((preds >= 0) & (preds <= imgsz)).all(dim=1)
+    final_mask = empty_mask & inside_mask
+
+    empty_boxes = preds[final_mask]
+    empty_scores = pred_scores[final_mask].squeeze(-1)
     all_empty_idx = torch.arange(len(empty_boxes), device=preds.device)
     return empty_boxes, empty_scores, all_empty_idx
 
@@ -440,8 +465,8 @@ def redistribute_deficit(capacities, total_deficit, empty_boxes_all, empty_score
     return empty_boxes_per_img, total_deficit
 
 
-def sample_empty_boxes(gt_bboxes: torch.Tensor, pred_bboxes: torch.Tensor, pred_scores: torch.Tensor, hn_ratio: float = 0.5,
-                       iou_eps: float = 1e-6):
+def sample_empty_boxes(gt_bboxes: torch.Tensor, pred_bboxes: torch.Tensor, pred_scores: torch.Tensor, hn_ratio: float,
+                       imgsz: int, iou_eps: float = 1e-5):
     """
     Sample empty bounding boxes for each image in the batch based on ground truth boxes and hard negative ratio.
     Args:
@@ -449,6 +474,7 @@ def sample_empty_boxes(gt_bboxes: torch.Tensor, pred_bboxes: torch.Tensor, pred_
         pred_bboxes (torch.Tensor):  Predicted bounding boxes of shape (B, N, 4).
         pred_scores (torch.Tensor):  Confidence scores of shape (B, N, 1).
         hn_ratio (float):            Ratio of hard negatives to sample.
+        imgsz (int):                 Image size. 
         iou_eps (float):             IoU threshold to consider a box as empty.
     Returns:
         empty_boxes_per_img (list):  List of sampled empty bounding boxes per image, each of shape (T_i, 4).
@@ -472,7 +498,8 @@ def sample_empty_boxes(gt_bboxes: torch.Tensor, pred_bboxes: torch.Tensor, pred_
 
         # full empties
         empty_boxes, empty_scores, all_empty_idx = get_empty_boxes(preds=pred_bboxes[b], gt=gt, 
-                                                                   pred_scores=pred_scores[b], iou_eps=iou_eps)
+                                                                   pred_scores=pred_scores[b], imgsz=imgsz,
+                                                                   iou_eps=iou_eps)
 
         # sampled empties
         sampled_boxes, sel_idx = sample_from_empty(empty_boxes=empty_boxes, empty_scores=empty_scores, 
@@ -500,6 +527,7 @@ def sample_empty_boxes(gt_bboxes: torch.Tensor, pred_bboxes: torch.Tensor, pred_
                                  empty_scores_all=empty_scores_all, all_empty_idx_all=all_empty_idx_all, 
                                  empty_boxes_per_img=empty_boxes_per_img, selected_indices_per_img=selected_indices_per_img, 
                                  hn_ratio=hn_ratio)
+
     
 
 def segment2box(segment, width: int = 640, height: int = 640):

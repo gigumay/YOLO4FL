@@ -16,6 +16,7 @@ from ultralytics.utils.tal import RotatedTaskAlignedAssigner, TaskAlignedAssigne
 from ultralytics.utils.torch_utils import autocast
 
 from .metrics import bbox_iou, probiou
+from .ops import sample_empty_boxes
 from .tal import bbox2dist
 from sklearn.cluster import KMeans
 
@@ -198,7 +199,6 @@ class KeypointLoss(nn.Module):
 
 class v8DetectionLoss:
     """Criterion class for computing training losses for YOLOv8 object detection."""
-    #TODO: Add negative mining into TAL (add option to not pick most confident background predictions)
     def __init__(self, model, tal_topk: int = 10, msa_featmap_names: list = ["P3", "P4", "P5"]): 
         """Initialize v8DetectionLoss with model parameters and task-aligned assignment settings. Also initializes a
         MultiScaleRoIAlign object for object feature extraction."""
@@ -254,24 +254,6 @@ class v8DetectionLoss:
             # pred_dist = pred_dist.view(b, a, c // 4, 4).transpose(2,3).softmax(3).matmul(self.proj.type(pred_dist.dtype))
             # pred_dist = (pred_dist.view(b, a, c // 4, 4).softmax(2) * self.proj.type(pred_dist.dtype).view(1, 1, -1, 1)).sum(2)
         return dist2bbox(pred_dist, anchor_points, xywh=False)
-    
-    def sample_empty_boxes(self, gt_bboxes: torch.Tensor, pred_bboxes: torch.Tensor, pred_scores: torch.Tensor, hn_ratio: float=0.5) -> torch.Tensor:
-        # gt_bboxes shape = (batch_size, max_number of objects in batch, 4). max_number of objects in batch corresponds to the maximum number 
-        # of objects in any image in the batch. For images that contain less objects, superfluous tensor elements are zeroed out
-        # pred_bboxes shape = (batch_size, n_anchors, 4). n_anchors = summ of flattened feature map sizes (8400)
-        # pred_scores shape = (batch_size, n_anchors, 1)
-        # Sort pred boxes by scores (descending)
-        # Measure iou between gt and pred boxes
-        # Pick boxes with zero IoU with GT. Pick a total number that is equal to the number of GTs or as many as possible if there are not enough zero IoU empty boxes. 
-            # From that amount pick the specified fraction of hard negatives (hn)
-        # for each image in the batch, compute the difference between the number of GT boxes and the number of empty boxes that can be sampled
-        # for images where not enough empty boxes can be sampled, sample all the empty boxes and keep track of the deficit
-        # greedily sample the deficit from imgages that have capacity
-        # If this is not possible (not enough empty boxes in the whole batch), report deficit
-        # return empty boxes. output must be a list of length batch_size where eahc element is a 2d tensor (n_empty, 4)
-
-        
-        pass
 
 
     def __call__(self, preds: Any, embds: list, batch: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -300,6 +282,7 @@ class v8DetectionLoss:
         pred_bboxes = self.bbox_decode(anchor_points, pred_distri)  # xyxy, (b, h*w, 4)
         # dfl_conf = pred_distri.view(batch_size, -1, 4, self.reg_max).detach().softmax(-1)
         # dfl_conf = (dfl_conf.amax(-1).mean(-1) + dfl_conf.amax(-1).amin(-1)) / 2
+
 
         _, target_bboxes, target_scores, fg_mask, _ = self.assigner(
             # pred_scores.detach().sigmoid() * 0.8 + dfl_conf.unsqueeze(-1) * 0.2,
@@ -331,6 +314,8 @@ class v8DetectionLoss:
                                      is_training=True, 
                                      gt_bboxes=gt_bboxes,
                                      msa=self.msa)
+        
+        
         
         if self.hyp.distance_metric == "l2":
             _, distances = assign_local2global_proto(local_proto=local_proto, global_proto=self.global_proto, return_distances=True)
