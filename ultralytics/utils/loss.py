@@ -307,22 +307,41 @@ class v8DetectionLoss:
                 pred_distri, pred_bboxes, anchor_points, target_bboxes, target_scores, target_scores_sum, fg_mask
             )
 
-        # generate batch prototype
-        local_proto = generate_proto(embds=embds,
-                                     hyp=self.hyp,
-                                     aggregate=self.hyp.agg_features and self.hyp.n_protos_per_class == 1,
-                                     is_training=True, 
-                                     gt_bboxes=gt_bboxes,
-                                     msa=self.msa)
+        # generate batch prototypes
+        local_protos = {k: None for k in self.global_protos.keys()}
+
+        if len(local_protos.keys()) != 2:
+            raise NotImplementedError("Mutli-class prototyping currently not implemented!")
         
+        # sanity check
+        assert loss[3] == 0, "ptl initialized non-zero!"
+
+        for k in local_protos.keys():
+            if k != "background":
+               local_protos[k] = generate_proto(embds=embds,
+                                                hyp=self.hyp,
+                                                aggregate=self.hyp.agg_features and self.hyp.n_protos_per_class == 1,
+                                                is_training=True, 
+                                                gt_bboxes=gt_bboxes,
+                                                msa=self.msa)
+            else:
+                if self.hyp.use_backgrounds:
+                    local_protos[k] = generate_proto(embds=embds, 
+                                                     hyp=self.hyp, 
+                                                     aggregate=self.hyp.agg_features and self.hyp.n_protos_per_class == 1,
+                                                     is_training=True, 
+                                                     gt_bboxes=gt_bboxes,
+                                                     msa=self.msa, 
+                                                     use_background=True, 
+                                                     all_preds=(pred_bboxes.detach() * stride_tensor).type(gt_bboxes.dtype),
+                                                     all_scores=pred_scores.detach().sigmoid())
         
-        
-        if self.hyp.distance_metric == "l2":
-            _, distances = assign_local2global_proto(local_proto=local_proto, global_proto=self.global_proto, return_distances=True)
-            assert len(distances.shape) == 1 and distances.shape[0] == local_proto.shape[0]
-            loss[3] = distances.mean()
-        else:
-            raise NotImplementedError("Currently only L2 distance is supported.")
+            if self.hyp.distance_metric == "l2":
+                _, distances = assign_local2global_proto(local_proto=local_protos[k], global_proto=self.global_protos[k], return_distances=True)
+                assert len(distances.shape) == 1 and distances.shape[0] == local_protos[k].shape[0]
+                loss[3] += distances.mean()
+            else:
+                raise NotImplementedError("Currently only L2 distance is supported.")
         
 
         loss[0] *= self.hyp.box  # box gain
