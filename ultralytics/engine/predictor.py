@@ -179,7 +179,8 @@ class BasePredictor:
             if self.args.visualize and (not self.source_type.tensor)
             else False
         )
-        return self.model(im, augment=self.args.augment, visualize=visualize, embed=self.args.embed, *args, **kwargs)
+        return self.model(im, augment=self.args.augment, visualize=visualize, embed=self.args.embed, 
+                          return_all_preds=self.args.return_all_preds, *args, **kwargs)
 
     def pre_transform(self, im: List[np.ndarray]) -> List[np.ndarray]:
         """
@@ -328,8 +329,11 @@ class BasePredictor:
                 # Inference
                 with profilers[1]:
                     preds = self.inference(im, *args, **kwargs)
-                    if self.args.embed:
+                    if self.args.embed and not self.args.return_all_preds:
                         yield from [preds] if isinstance(preds, torch.Tensor) else preds  # yield embedding tensors
+                        continue
+                    if self.args.embed and self.args.return_all_preds:
+                        yield preds
                         continue
 
                 # Postprocess
