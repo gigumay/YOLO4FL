@@ -137,21 +137,25 @@ def get_features(embds: list, hyp: SimpleNamespace, gt_bboxes: torch.Tensor=None
         all_preds (torch.Tensor, optional):                 Predicted bounding boxes with shape (bs, num_boxes, 4) in xyxy format. Required if 'use_background' is True.
         all_scores (torch.Tensor, optional):                Confidence scores with shape (bs, num_boxes, 1). Required if 'use_background' is True.
     Returns:
-        Extracted and flattened features with shape (total_boxes, C) if 'isolate_objects' is True, otherwise (N, C).
+        Extracted and flattened features with shape (total_boxes, C) if 'isolate_objects' is True, otherwise (N, C). Also returns the deficit in empty boxes
+        when use_background is True. 
     """
 
-    
+    background_deficit = None
     if not hyp.isolate_objects:
         features_3D = embds[0]
     else:
         maps = OrderedDict({f"P{i+3}": fm for i, fm in enumerate(embds)})
         if not use_background:
-            features_3D = extract_obj_features(maps=maps, gt_bboxes=gt_bboxes, msa=msa, box_padding=hyp.msa_box_padding)
+            box_list = extract_obj_features(maps=maps, gt_bboxes=gt_bboxes, msa=msa, box_padding=hyp.msa_box_padding)
         else:
-            empty_boxes = sample_empty_boxes(gt_bboxes=gt_bboxes, pred_bboxes=all_preds, pred_scores=all_scores, hn_ratio=hyp.hn_ratio_bckgrnd, imgsz=hyp.imgsz)
-            features_3D = msa.forward(x=maps,  boxes=empty_boxes, image_shapes=[hyp.imgsz]*hyp.batch)
+            box_list, deficit = sample_empty_boxes(gt_bboxes=gt_bboxes, pred_bboxes=all_preds, pred_scores=all_scores, hn_ratio=hyp.hn_ratio_bckgrnd, imgsz=hyp.imgsz)
+            background_deficit = deficit
+        
+        features_3D = msa.forward(x=maps,  boxes=box_list, image_shapes=[hyp.imgsz]*hyp.batch)
+        
     
-    return flatten_features(features_3D)
+    return flatten_features(features_3D), background_deficit
 
 
 def agg_features(features: torch.Tensor, hyp: SimpleNamespace, is_training: bool =True, clustering_algrthm: KMeans=None):
@@ -200,7 +204,7 @@ def generate_proto(embds: list, hyp: SimpleNamespace, aggregate: bool, is_traini
     """
     assert not (use_background and (all_preds is None or all_scores is None)), "'all_preds' and 'all_scores' must be provided when 'use_background' is True"
 
-    features = get_features(embds=embds, hyp=hyp, gt_bboxes=gt_bboxes, msa=msa, use_background=use_background, all_preds=all_preds, all_scores=all_scores)  # (total_boxes, C) or (N, C)
+    features, _ = get_features(embds=embds, hyp=hyp, gt_bboxes=gt_bboxes, msa=msa, use_background=use_background, all_preds=all_preds, all_scores=all_scores)  # (total_boxes, C) or (N, C)
 
     if not aggregate:
         return features
@@ -352,7 +356,7 @@ def get_empty_boxes(preds, gt, pred_scores, iou_eps, imgsz):
 
     empty_boxes = preds[final_mask]
     empty_scores = pred_scores[final_mask].squeeze(-1)
-    all_empty_idx = torch.arange(len(empty_boxes), device=preds.device)
+    all_empty_idx = torch.arange(empty_boxes.shape[0], device=preds.device)
     return empty_boxes, empty_scores, all_empty_idx
 
 
@@ -377,6 +381,9 @@ def sample_from_empty(empty_boxes, empty_scores, all_empty_idx, num_gt, hn_ratio
 
     hn_count = int(take * hn_ratio)
     rn_count = take - hn_count
+
+    # just to be safe 
+    assert len(empty_scores.shape) == 1, "Shape Inconsistency!"
 
     hn_idx = empty_scores.argsort(descending=True)[:hn_count]
 
@@ -482,7 +489,7 @@ def sample_empty_boxes(gt_bboxes: torch.Tensor, pred_bboxes: torch.Tensor, pred_
     batch_size, _, _ = pred_bboxes.shape
 
     # Step 1: sort predictions by score
-    pred_bboxes, pred_scores = sort_preds(pred_bboxes=pred_bboxes, pred_scores=pred_scores)
+    # pred_bboxes, pred_scores = sort_preds(pred_bboxes=pred_bboxes, pred_scores=pred_scores)
 
     # holders
     empty_boxes_per_img = [[] for _ in range(batch_size)]
@@ -490,7 +497,7 @@ def sample_empty_boxes(gt_bboxes: torch.Tensor, pred_bboxes: torch.Tensor, pred_
     empty_boxes_all, empty_scores_all, all_empty_idx_all = [], [], []
     deficits, capacities = [], []
 
-    # Step 2: process each image
+    # Process each image
     for b in range(batch_size):
         gt = gt_bboxes[b]
         gt = gt[gt.sum(dim=1) > 0]  # remove padded zeros
@@ -534,12 +541,13 @@ def sample_empty_boxes(gt_bboxes: torch.Tensor, pred_bboxes: torch.Tensor, pred_
     nonzero_row = ~is_zero_row           
     total_boxes = nonzero_row.sum()  
     total_backgrounds = sum([eb.shape[0] for eb in empty_boxes_per_img])
+    diff = total_boxes - total_backgrounds
 
-    if (total_boxes - total_backgrounds) / total_boxes > 0.05:
-        LOGGER.warning(f"Number of objects: {total_boxes} \t Number of background that could be sampled: {total_backgrounds}.")
+    if diff / total_boxes > 0.05:
+       print(f"Number of objects: {total_boxes} \t Number of background that could be sampled: {total_backgrounds}.")
 
+    return empty_boxes_per_img, diff
 
-    
 
 def segment2box(segment, width: int = 640, height: int = 640):
     """

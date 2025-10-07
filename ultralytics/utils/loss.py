@@ -325,7 +325,7 @@ class v8DetectionLoss:
                                                 gt_bboxes=gt_bboxes,
                                                 msa=self.msa)
             else:
-                if self.hyp.use_backgrounds:
+                if self.hyp.use_background:
                     local_protos[k] = generate_proto(embds=embds, 
                                                      hyp=self.hyp, 
                                                      aggregate=self.hyp.agg_features and self.hyp.n_protos_per_class == 1,
