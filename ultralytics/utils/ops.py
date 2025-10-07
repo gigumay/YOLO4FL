@@ -78,13 +78,11 @@ class Profile(contextlib.ContextDecorator):
         return time.perf_counter()
 
 
-def extract_obj_features(maps: OrderedDict, gt_bboxes: torch.Tensor, msa: torchvision.ops.MultiScaleRoIAlign, img_size: tuple = (640, 640), box_padding: float = 0.0):
+def get_obj_boxes(gt_bboxes: torch.Tensor, img_size: tuple = (640, 640), box_padding: float = 0.0):
     """
-    Extract object features from the neck output feature maps (P3-P5). Uses multi scale RoI alignment.
+    Get list of object boxes from gt label tensor. Add padding if specified.
     Args:
-        maps (OrderedDict):                         OrderedDict of feature maps from the neck with shapes {'P3': (N,C1,W1,H1), 'P4': (N,C2,W2,H2), 'P5': (N,C3,W3,H3)}.
         gt_bboxes (torch.Tensor):                   Ground truth bounding boxes with shape (N, num_boxes, 4) in xyxy format.
-        msa (torchvision.ops.MultiScaleRoIAlign):   MultiScaleRoIAlign module for extracting features.
         img_size (tuple):                           Size of the input image as (height, width).
         box_padding (float):                        Padding factor to apply to bounding boxes (e.g., 0.1 for 10% padding).
     Returns:
@@ -106,9 +104,7 @@ def extract_obj_features(maps: OrderedDict, gt_bboxes: torch.Tensor, msa: torchv
         gt_bboxes = torch.clamp(gt_bboxes, min=0, max=max(img_size))
 
     box_list = [gt_bboxes[i][(gt_bboxes[i] != 0).any(dim=1)] for i in range(bs)]
-    obj_features = msa.forward(x=maps, boxes=box_list, image_shapes=[img_size]*bs)
-
-    return obj_features
+    return box_list
 
 
 def flatten_features(features: torch.Tensor):
@@ -147,14 +143,13 @@ def get_features(embds: list, hyp: SimpleNamespace, gt_bboxes: torch.Tensor=None
     else:
         maps = OrderedDict({f"P{i+3}": fm for i, fm in enumerate(embds)})
         if not use_background:
-            box_list = extract_obj_features(maps=maps, gt_bboxes=gt_bboxes, msa=msa, box_padding=hyp.msa_box_padding)
+            box_list = get_obj_boxes(gt_bboxes=gt_bboxes, box_padding=hyp.msa_box_padding)
         else:
             box_list, deficit = sample_empty_boxes(gt_bboxes=gt_bboxes, pred_bboxes=all_preds, pred_scores=all_scores, hn_ratio=hyp.hn_ratio_bckgrnd, imgsz=hyp.imgsz)
             background_deficit = deficit
         
-        features_3D = msa.forward(x=maps,  boxes=box_list, image_shapes=[hyp.imgsz]*hyp.batch)
-        
-    
+        features_3D = msa.forward(x=maps,  boxes=box_list, image_shapes=[(hyp.imgsz, hyp.imgsz)]*hyp.batch)
+
     return flatten_features(features_3D), background_deficit
 
 
