@@ -214,9 +214,10 @@ class v8DetectionLoss:
                                                                                                 sampling_ratio=self.hyp.msa_sampling_ratio,
                                                                                                 canonical_scale=self.hyp.msa_canonical_scale, 
                                                                                                 canonical_level=self.hyp.msa_canonical_level)
-        self.global_protos = {k: torch.load(v).to(device) for k, v in self.hyp.proto_dict.items()}
-        for proto in self.global_protos.values():
-            assert len(proto.shape) == 2 and proto.shape[0] == self.hyp.n_protos_per_class 
+        self.global_obj_proto = torch.load(self.hyp.global_obj_proto).to(device)
+        assert len(self.global_obj_proto.shape) == 2 and self.global_obj_proto.shape[0] == self.hyp.n_protos
+        self.global_bg_proto = torch.load(self.hyp.global_bg_proto).to(device)
+        assert len(self.global_bg_proto.shape) == 2 and self.global_bg_proto.shape[0] == self.hyp.n_protos
         self.stride = m.stride  # model strides
         self.nc = m.nc  # number of classes
         self.no = m.nc + m.reg_max * 4
@@ -258,7 +259,7 @@ class v8DetectionLoss:
 
     def __call__(self, preds: Any, embds: list, batch: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
         """Calculate the sum of the loss for box, cls and dfl multiplied by batch size."""
-        loss = torch.zeros(4, device=self.device)  # box, cls, dfl, ptl
+        loss = torch.zeros(5, device=self.device)  # box, cls, dfl, ptl, bgl
         feats = preds[1] if isinstance(preds, tuple) else preds
         pred_distri, pred_scores = torch.cat([xi.view(feats[0].shape[0], self.no, -1) for xi in feats], 2).split(
             (self.reg_max * 4, self.nc), 1
@@ -308,46 +309,33 @@ class v8DetectionLoss:
             )
 
         # generate batch prototypes
-        local_protos = {k: None for k in self.global_protos.keys()}
+        local_obj_proto = generate_proto(embds=embds,hyp=self.hyp,
+                                         aggregate=self.hyp.agg_features and self.hyp.n_protos_per_class == 1,
+                                         is_training=True, gt_bboxes=gt_bboxes, msa=self.msa)
 
-        if len(local_protos.keys()) != 2:
-            raise NotImplementedError("Mutli-class prototyping currently not implemented!")
-        
-        # sanity check
-        assert loss[3] == 0, "ptl initialized non-zero!"
+        if self.hyp.use_background:
+            local_bg_proto = generate_proto(embds=embds, hyp=self.hyp, 
+                                            aggregate=self.hyp.agg_features and self.hyp.n_protos_per_class == 1,
+                                            is_training=True, gt_bboxes=gt_bboxes,msa=self.msa, use_background=True, 
+                                            all_preds=(pred_bboxes.detach() * stride_tensor).type(gt_bboxes.dtype),
+                                            all_scores=pred_scores.detach().sigmoid())
 
-        for k in local_protos.keys():
-            if k != "background":
-               local_protos[k] = generate_proto(embds=embds,
-                                                hyp=self.hyp,
-                                                aggregate=self.hyp.agg_features and self.hyp.n_protos_per_class == 1,
-                                                is_training=True, 
-                                                gt_bboxes=gt_bboxes,
-                                                msa=self.msa)
-            else:
-                if self.hyp.use_background:
-                    local_protos[k] = generate_proto(embds=embds, 
-                                                     hyp=self.hyp, 
-                                                     aggregate=self.hyp.agg_features and self.hyp.n_protos_per_class == 1,
-                                                     is_training=True, 
-                                                     gt_bboxes=gt_bboxes,
-                                                     msa=self.msa, 
-                                                     use_background=True, 
-                                                     all_preds=(pred_bboxes.detach() * stride_tensor).type(gt_bboxes.dtype),
-                                                     all_scores=pred_scores.detach().sigmoid())
-        
-            if self.hyp.distance_metric == "l2":
-                _, distances = assign_local2global_proto(local_proto=local_protos[k], global_proto=self.global_protos[k], return_distances=True)
-                assert len(distances.shape) == 1 and distances.shape[0] == local_protos[k].shape[0]
-                loss[3] += distances.mean()
-            else:
-                raise NotImplementedError("Currently only L2 distance is supported.")
-        
+        if self.hyp.distance_metric == "l2":
+            _, obj_distances = assign_local2global_proto(local_proto=local_obj_proto, global_proto=self.global_obj_protos, return_distances=True)
+            assert len(obj_distances.shape) == 1 and obj_distances.shape[0] == local_obj_proto.shape[0]
+            loss[3] = obj_distances.mean()
 
+            _, bg_distances = assign_local2global_proto(local_proto=local_bg_proto, global_proto=self.global_bg_protos, return_distances=True)
+            assert len(bg_distances.shape) == 1 and bg_distances.shape[0] == local_bg_proto.shape[0]
+            loss[4] = bg_distances.mean()
+        else:
+            raise NotImplementedError("Currently only L2 distance is supported.")
+    
         loss[0] *= self.hyp.box  # box gain
         loss[1] *= self.hyp.cls  # cls gain
         loss[2] *= self.hyp.dfl  # dfl gain
         loss[3] *= self.hyp.ptl  # ptl gain
+        loss[4] *= self.hyp.bgl  # bgl gain
 
         return loss * batch_size, loss.detach()  # loss(box, cls, dfl)
 
