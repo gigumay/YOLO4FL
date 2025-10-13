@@ -48,6 +48,7 @@ class YOLOESegTrainer(YOLOETrainer, SegmentationTrainer):
 
         return model
 
+
     def get_validator(self):
         """
         Create and return a validator for YOLOE segmentation model evaluation.

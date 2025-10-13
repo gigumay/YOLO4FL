@@ -139,6 +139,7 @@ def get_features(embds: list, hyp: SimpleNamespace, gt_bboxes: torch.Tensor=None
 
     background_deficit = None
     if not hyp.isolate_objects:
+        assert not use_background, "Background prototype extraction not supported for full feature maps!"
         features_3D = embds[0]
     else:
         maps = OrderedDict({f"P{i+3}": fm for i, fm in enumerate(embds)})
@@ -153,18 +154,18 @@ def get_features(embds: list, hyp: SimpleNamespace, gt_bboxes: torch.Tensor=None
     return flatten_features(features_3D), background_deficit
 
 
-def agg_features(features: torch.Tensor, hyp: SimpleNamespace, is_training: bool =True, clustering_algrthm: KMeans=None):
+def agg_features(features: torch.Tensor, n_protos: int, is_training: bool =True, clustering_algrthm: KMeans=None):
     """
     Aggregate features into prototypes via mean or clustering.
     Args:
         features (torch.Tensor):                Input features with shape (N, C).
-        hyp (SimpleNamespace):                  Hyperparameters including 'n_protos_per_class' (int).
+        n_protos (int):                         Number of prototypes (clusters) to extract. 
         is_training (bool):                     Whether the model is in training mode. Clustering is not supported during training.
-        clustering_algrthm (KMeans, optional):  Clustering algorithm instance from sklearn. Required if 'n_protos_per_class' > 1.
+        clustering_algrthm (KMeans, optional):  Clustering algorithm instance from sklearn. Required if 'n_protos' > 1.
     Returns:
-        Aggregated prototypes with shape (n_protos_per_class, C).
+        Aggregated prototypes with shape (n_protos, C).
     """
-    if hyp.n_protos_per_class == 1:
+    if n_protos == 1:
         proto = features.mean(dim=0, keepdim=True)
     else:
         assert not is_training, "Clustering during training currently not supported"
@@ -177,25 +178,26 @@ def agg_features(features: torch.Tensor, hyp: SimpleNamespace, is_training: bool
 
 
 def generate_proto(embds: list, hyp: SimpleNamespace, aggregate: bool, is_training: bool, gt_bboxes: torch.Tensor=None, 
-                   msa: torchvision.ops.MultiScaleRoIAlign=None, clustering_algrthm: KMeans=None, use_background: bool=False, 
-                   all_preds: torch.Tensor=None, all_scores: torch.Tensor=None):
+                   msa: torchvision.ops.MultiScaleRoIAlign=None, obj_clustering_algrthm: KMeans=None, use_background: bool=False, 
+                   bg_clustering_algrthm: KMeans=None, all_preds: torch.Tensor=None, all_scores: torch.Tensor=None):
     """
     Generate prototypes from neck output feature maps (P3-P5).
     Args:
         embds (list):                                       List of feature maps from the neck with shapes [(N,C1,W1,H1), (N,C2,W2,H2), (N,C3,W3,H3)].
-        hyp (SimpleNamespace):                              Hyperparameters including 'isolate_objects' (bool) and 'n_protos_per_class' (int).
+        hyp (SimpleNamespace):                              Hyperparameters including 'isolate_objects' (bool) and 'n_protos' (int).
         aggregate (bool):                                   Whether to aggregate features into prototypes.
         is_training (bool):                                 Whether the model is in training mode. Clustering is not supported during training.
         gt_bboxes (torch.Tensor, optional):                 Ground truth bounding boxes with shape (N, num_boxes, 4) in xyxy format. Required
                                                             if 'isolate_objects' is True.
         msa (torchvision.ops.MultiScaleRoIAlign, optional): MultiScaleRoIAlign module for extracting features. Required if 'isolate_objects' is True.
-        clustering_algrthm (KMeans, optional):              Clustering algorithm instance from sklearn. Required if 'n_protos_per_class' > 1.
+        obj_clustering_algrthm (KMeans, optional):          Clustering algorithm instance from sklearn for clustering object features. Required if 'n_protos' > 1. 
         use_background (bool):                              Whether to extract background features.
+        bg_clustering_algrthm (KMeans, optional):           Clustering algorithm instance from sklearn for clustering background features. Required if 'n_protos' > 1.
         all_preds (torch.Tensor, optional):                 Predicted bounding boxes with shape (bs, num_boxes, 4) in xyxy format. Required if 'use_background' is True.
         all_scores (torch.Tensor, optional):                Confidence scores with shape (bs, num_boxes, 1). Required if 'use_background' is True.
         imgsz (int):                                        Image size.
     Returns:
-        Generated prototypes with shape (n_protos_per_class, C) if 'aggregate' is True, otherwise (total_boxes, C).
+        Generated prototypes with shape (n_protos, C) if 'aggregate' is True, otherwise (total_boxes, C).
     """
     assert not (use_background and (all_preds is None or all_scores is None)), "'all_preds' and 'all_scores' must be provided when 'use_background' is True"
 
@@ -204,7 +206,10 @@ def generate_proto(embds: list, hyp: SimpleNamespace, aggregate: bool, is_traini
     if not aggregate:
         return features
     else:
-        return agg_features(features=features, hyp=hyp, is_training=is_training, clustering_algrthm=clustering_algrthm)
+        if not use_background:
+            return agg_features(features=features, hyp=hyp, is_training=is_training, clustering_algrthm=obj_clustering_algrthm)
+        else: 
+            return agg_features(features=features, hyp=hyp, is_training=is_training, clustering_algrthm=bg_clustering_algrthm)
     
 
 def assign_local2global_proto(local_proto: torch.Tensor, global_proto: torch.Tensor, return_distances: bool):
@@ -249,7 +254,7 @@ def compute_cost_matrix(clusters, candidates):
     """
     Compute cost matrix for grouping of prototypes.
     Args:
-        clusters (torch.Tensor):   Current clusters with shape (n_clusters, n_protos_per_class, C).
+        clusters (torch.Tensor):   Current clusters with shape (n_clusters, n_protos, C).
         candidates (torch.Tensor):  Candidate prototypes to assign with shape (n_candidates, C).
     Returns:
         Cost matrix with shape (n_candidates, n_clusters).
@@ -265,13 +270,13 @@ def compute_cost_matrix(clusters, candidates):
 
 def prototype_matching(prototypes, n_orders=10):
     """
-    Cluster prototypes into groups of size n_protos_per_class by iteratively optimizing via Jonker-Volgenant algorithm 
+    Cluster prototypes into groups of size n_protos by iteratively optimizing via Jonker-Volgenant algorithm 
     to approximat the global cost minimum as measured via the L2 distance.
     Args:
         prototypes (torch.Tensor): Prototypes to cluster with shape (n_prototypes, C).
         n_orders (int):            Number of random orders to try for clustering to reduce order bias.
     Returns:
-        best_clusters (torch.Tensor):   Clustered prototypes with shape (n_clusters, n_protos_per_class, C).
+        best_clusters (torch.Tensor):   Clustered prototypes with shape (n_clusters, n_protos, C).
         best_total_cost (float):        Total cost associated with the best clustering.
     """
     best_total_cost = np.inf

@@ -215,9 +215,9 @@ class v8DetectionLoss:
                                                                                                 canonical_scale=self.hyp.msa_canonical_scale, 
                                                                                                 canonical_level=self.hyp.msa_canonical_level)
         self.global_obj_proto = torch.load(self.hyp.global_obj_proto).to(device)
-        assert len(self.global_obj_proto.shape) == 2 and self.global_obj_proto.shape[0] == self.hyp.n_protos
+        assert len(self.global_obj_proto.shape) == 2 and self.global_obj_proto.shape[0] == self.hyp.n_obj_protos
         self.global_bg_proto = torch.load(self.hyp.global_bg_proto).to(device)
-        assert len(self.global_bg_proto.shape) == 2 and self.global_bg_proto.shape[0] == self.hyp.n_protos
+        assert len(self.global_bg_proto.shape) == 2 and self.global_bg_proto.shape[0] == self.hyp.n_bg_protos
         self.stride = m.stride  # model strides
         self.nc = m.nc  # number of classes
         self.no = m.nc + m.reg_max * 4
@@ -310,26 +310,30 @@ class v8DetectionLoss:
 
         # generate batch prototypes
         local_obj_proto = generate_proto(embds=embds,hyp=self.hyp,
-                                         aggregate=self.hyp.agg_features and self.hyp.n_protos_per_class == 1,
+                                         aggregate=self.hyp.agg_features and self.hyp.n_obj_protos == 1,
                                          is_training=True, gt_bboxes=gt_bboxes, msa=self.msa)
+        
+        if self.hyp.distance_metric == "l2":
+            _, obj_distances = assign_local2global_proto(local_proto=local_obj_proto, global_proto=self.global_obj_proto, return_distances=True)
+            assert len(obj_distances.shape) == 1 and obj_distances.shape[0] == local_obj_proto.shape[0]
+            loss[3] = obj_distances.mean() 
+        else:
+            raise NotImplementedError("Currently only L2 distance is supported.")
+        
 
         if self.hyp.use_background:
             local_bg_proto = generate_proto(embds=embds, hyp=self.hyp, 
-                                            aggregate=self.hyp.agg_features and self.hyp.n_protos_per_class == 1,
+                                            aggregate=self.hyp.agg_features and self.hyp.n_bg_protos == 1,
                                             is_training=True, gt_bboxes=gt_bboxes,msa=self.msa, use_background=True, 
                                             all_preds=(pred_bboxes.detach() * stride_tensor).type(gt_bboxes.dtype),
                                             all_scores=pred_scores.detach().sigmoid())
+            if self.hyp.distance_metric == "l2":
+                _, bg_distances = assign_local2global_proto(local_proto=local_bg_proto, global_proto=self.global_bg_protos, return_distances=True)
+                assert len(bg_distances.shape) == 1 and bg_distances.shape[0] == local_bg_proto.shape[0]
+                loss[4] = bg_distances.mean()
+            else:
+                raise NotImplementedError("Currently only L2 distance is supported.")
 
-        if self.hyp.distance_metric == "l2":
-            _, obj_distances = assign_local2global_proto(local_proto=local_obj_proto, global_proto=self.global_obj_protos, return_distances=True)
-            assert len(obj_distances.shape) == 1 and obj_distances.shape[0] == local_obj_proto.shape[0]
-            loss[3] = obj_distances.mean()
-
-            _, bg_distances = assign_local2global_proto(local_proto=local_bg_proto, global_proto=self.global_bg_protos, return_distances=True)
-            assert len(bg_distances.shape) == 1 and bg_distances.shape[0] == local_bg_proto.shape[0]
-            loss[4] = bg_distances.mean()
-        else:
-            raise NotImplementedError("Currently only L2 distance is supported.")
     
         loss[0] *= self.hyp.box  # box gain
         loss[1] *= self.hyp.cls  # cls gain
@@ -337,7 +341,7 @@ class v8DetectionLoss:
         loss[3] *= self.hyp.ptl  # ptl gain
         loss[4] *= self.hyp.bgl  # bgl gain
 
-        return loss * batch_size, loss.detach()  # loss(box, cls, dfl)
+        return loss * batch_size, loss.detach()  # loss(box, cls, dfl, ptl, bgl)
 
 
 class v8SegmentationLoss(v8DetectionLoss):
