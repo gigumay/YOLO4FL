@@ -207,9 +207,9 @@ def generate_proto(embds: list, hyp: SimpleNamespace, aggregate: bool, is_traini
         return features
     else:
         if not use_background:
-            return agg_features(features=features, hyp=hyp, is_training=is_training, clustering_algrthm=obj_clustering_algrthm)
+            return agg_features(features=features, n_protos=hyp.n_obj_protos, is_training=is_training, clustering_algrthm=obj_clustering_algrthm)
         else: 
-            return agg_features(features=features, hyp=hyp, is_training=is_training, clustering_algrthm=bg_clustering_algrthm)
+            return agg_features(features=features, n_protos=hyp.n_bg_protos, is_training=is_training, clustering_algrthm=bg_clustering_algrthm)
     
 
 def assign_local2global_proto(local_proto: torch.Tensor, global_proto: torch.Tensor, return_distances: bool):
@@ -400,6 +400,42 @@ def sample_from_empty(empty_boxes, empty_scores, all_empty_idx, num_gt, hn_ratio
     return empty_boxes[sel_idx], sel_idx
 
 
+def find_amount2take(capacities: list, deficit: int) -> list:
+    """
+    Calculate how many empty boxes to take from each image with surplus to cover the total deficit.
+    Args:
+        capacities (list): List of tuples (b, need, avail) for images with surplus.
+        deficit (int):     Total deficit of empty boxes across the batch.
+    Returns:
+        take_per_img (list): List of tuples (b, to_take) indicating how many boxes to take from each image.
+    """
+    extra = [[c[0], c[2] - c[1]] for c in capacities]
+
+    # sanity check to avoid getting stuck in loop
+    assert sum([e[1] for e in extra]) >= deficit, "Not enough background boxes to replenish deficit."
+
+    take_per_img = [[c[0], 0] for c in capacities]
+    idxs = [i for i in range(len(extra))]
+    
+    while deficit > 0: 
+        amount2take = int(math.ceil(deficit / len(extra)))
+        random.shuffle(idxs)
+        if deficit < len(idxs):
+            selected_idxs = idxs[:deficit]
+        else:
+            selected_idxs = idxs
+            
+        for idx in selected_idxs:
+            if extra[idx][1] <= 0:
+                continue 
+            taken = min(amount2take, extra[idx][1])
+            take_per_img[idx][1] += taken
+            extra[idx][1] -= taken
+            deficit -= taken
+    
+    return take_per_img
+
+
 def redistribute_deficit(capacities, total_deficit, empty_boxes_all, empty_scores_all, all_empty_idx_all, empty_boxes_per_img,
                          selected_indices_per_img, hn_ratio):
     """
@@ -414,20 +450,16 @@ def redistribute_deficit(capacities, total_deficit, empty_boxes_all, empty_score
         selected_indices_per_img (list):    Current list of selected indices per image.
         hn_ratio (float):                   Ratio of hard negatives to sample.
     Returns:
-        empty_boxes_per_img (list):         Updated list of sampled empty boxes per image after redistribution."""
+        empty_boxes_per_img (list):         Updated list of sampled empty boxes per image after redistribution.
+    """
     if total_deficit <= 0:
         return empty_boxes_per_img
+    
+    take_plan = (find_amount2take(capacities=capacities, deficit=total_deficit))
 
-    for b, need, avail in capacities:
-        if total_deficit <= 0:
+    for (b, to_take) in take_plan:
+        if to_take <= 0:
             break
-
-        # capacity = how many more we can take from this image
-        extra = avail - need if need > 0 else avail
-        if extra <= 0:
-            continue
-
-        to_take = min(extra, total_deficit)
 
         empty_boxes = empty_boxes_all[b]
         empty_scores = empty_scores_all[b]
@@ -467,7 +499,6 @@ def redistribute_deficit(capacities, total_deficit, empty_boxes_all, empty_score
             # update outputs
             empty_boxes_per_img[b] = torch.cat([empty_boxes_per_img[b], empty_boxes[sel_idx]], dim=0)
             selected_indices_per_img[b] = torch.cat([selected_indices_per_img[b], sel_idx])
-            total_deficit -= to_take
 
     return empty_boxes_per_img
 
