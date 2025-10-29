@@ -409,12 +409,15 @@ class BaseTrainer:
                         if not self.args.align_prototypes:
                             # zero out prototype loss
                             loss[3] = 0
+                            loss[4] = 0
+                            loss[5] = 0
                             self.loss_items[3] = 0
+                            self.loss_items[4] = 0
+                            self.loss_items[5] = 0
                     else:
                         loss, self.loss_items = self.model(batch)
                     
                     
-
                     self.loss = loss.sum()
                     if RANK != -1:
                         self.loss *= world_size

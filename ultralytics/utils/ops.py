@@ -146,7 +146,7 @@ def get_features(embds: list, hyp: SimpleNamespace, gt_bboxes: torch.Tensor=None
         if not use_background:
             box_list = get_obj_boxes(gt_bboxes=gt_bboxes, box_padding=hyp.msa_box_padding)
         else:
-            box_list, deficit = sample_empty_boxes(gt_bboxes=gt_bboxes, pred_bboxes=all_preds, pred_scores=all_scores, hn_ratio=hyp.hn_ratio_bckgrnd, imgsz=hyp.imgsz)
+            box_list, deficit = sample_empty_boxes(gt_bboxes=gt_bboxes, pred_bboxes=all_preds, pred_scores=all_scores, hn_ratio=hyp.hn_ratio_bg, imgsz=hyp.imgsz)
             background_deficit = deficit
         
         features_3D = msa.forward(x=maps,  boxes=box_list, image_shapes=[(hyp.imgsz, hyp.imgsz)]*hyp.batch)
@@ -154,7 +154,7 @@ def get_features(embds: list, hyp: SimpleNamespace, gt_bboxes: torch.Tensor=None
     return flatten_features(features_3D), background_deficit
 
 
-def agg_features(features: torch.Tensor, n_protos: int, is_training: bool =True, clustering_algrthm: KMeans=None):
+def agg_features(features: torch.Tensor, n_protos: int, is_training: bool=True, clustering_algrthm: KMeans=None):
     """
     Aggregate features into prototypes via mean or clustering.
     Args:

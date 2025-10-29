@@ -129,6 +129,8 @@ global_bg_proto: None # (str) path to the global background prototype file (.pt)
 align_prototypes: # (bool) whether to enforce alignment with the global prototype during training 
 ptl: 1.0 # (float) Prototype loss gain
 bgl: 0.5 # (float) Background prototype loss gain 
+pt_contr_loss: 1.0 # (float) Prototype contrastive loss gain
+pt_temp: 0.1 # (float) Temperature for prototype contrastive loss
 isolate_objects: True # (bool) whether to align using only object features. If False, the entire layer #22 is used
 distance_metric: "l2" # (string) metric used to calculate prototype distance. Alternative is "cosine". 
 n_obj_protos: 5 # (int) number of object prototypes (embeddign clusters) to extract 
