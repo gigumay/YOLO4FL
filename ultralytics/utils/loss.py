@@ -169,7 +169,7 @@ class PrototypeContrastiveLoss(nn.Module):
 
         Returns:
             Scalar loss value (torch.Tensor)
-        """
+        
         
         # Use L2 distance
         dist_obj = torch.cdist(local_obj_proto, global_obj_proto, p=2).pow(2)
@@ -184,6 +184,8 @@ class PrototypeContrastiveLoss(nn.Module):
         # Cross-entropy InfoNCE loss
         loss = F.cross_entropy(logits, labels)
         return loss
+        """
+        raise NotImplementedError("Currently not implemented.")
 
 
 class RotatedBboxLoss(BboxLoss):
@@ -301,7 +303,7 @@ class v8DetectionLoss:
 
     def __call__(self, preds: Any, embds: list, batch: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
         """Calculate the sum of the loss for box, cls and dfl multiplied by batch size."""
-        loss = torch.zeros(6, device=self.device)  # box, cls, dfl, ptl, bgl, contrastive loss 
+        loss = torch.zeros(5, device=self.device)  # box, cls, dfl, ptl, bgl, contrastive loss 
         feats = preds[1] if isinstance(preds, tuple) else preds
         pred_distri, pred_scores = torch.cat([xi.view(feats[0].shape[0], self.no, -1) for xi in feats], 2).split(
             (self.reg_max * 4, self.nc), 1
@@ -373,7 +375,7 @@ class v8DetectionLoss:
                 _, bg_distances = assign_local2global_proto(local_proto=local_bg_proto, global_proto=self.global_bg_proto, return_distances=True)
                 assert len(bg_distances.shape) == 1 and bg_distances.shape[0] == local_bg_proto.shape[0]
                 loss[4] = bg_distances.mean()
-                loss[5] = self.pt_contr_loss(local_obj_proto=local_obj_proto, global_obj_proto=self.global_obj_proto, global_bg_proto=self.global_bg_proto)
+                #loss[5] = self.pt_contr_loss(local_obj_proto=local_obj_proto, global_obj_proto=self.global_obj_proto, global_bg_proto=self.global_bg_proto)
             else:
                 raise NotImplementedError("Currently only L2 distance is supported.")
 
@@ -383,7 +385,7 @@ class v8DetectionLoss:
         loss[2] *= self.hyp.dfl  # dfl gain
         loss[3] *= self.hyp.ptl  # ptl gain
         loss[4] *= self.hyp.bgl  # bgl gain
-        loss[5] *= self.hyp.pt_contr_loss  # contrastive loss gain
+       #loss[5] *= self.hyp.pt_contr_loss  # contrastive loss gain
 
         return loss * batch_size, loss.detach()  # loss(box, cls, dfl, ptl, bgl)
 
