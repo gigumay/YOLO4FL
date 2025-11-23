@@ -382,8 +382,8 @@ def sample_from_empty(empty_boxes, empty_scores, all_empty_idx, num_gt, hn_ratio
     hn_count = int(take * hn_ratio)
     rn_count = take - hn_count
 
-    # just to be safe 
-    assert len(empty_scores.shape) == 1, "Shape Inconsistency!"
+    # sanity check
+    assert len(empty_scores.shape) == 1, "Unexpected shape for empty scores!"
 
     hn_idx = empty_scores.argsort(descending=True)[:hn_count]
 
