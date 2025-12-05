@@ -163,14 +163,15 @@ class PrototypeContrastiveLoss(nn.Module):
     def forward(self, local_obj_proto: torch.Tensor, global_obj_proto: torch.Tensor, global_bg_proto: torch.Tensor) -> torch.Tensor:
         """
         Arguments:
-            local_obj_proto: Local object prototypes extracted from the current batch. Shape (N, C)
-            global_obj_proto: Global object prototypes. Shape (M, C)
-            global_bg_protos: Global background prototypes. Shape (K, C)
+            local_obj_proto:        Local object prototype (can also be just un-aggregated features) extracted from the current batch. Shape (N, C)
+            global_obj_proto:       Global object prototypes. Shape (M, C)
+            global_bg_protos:       Global background prototypes. Shape (K, C)
 
         Returns:
             Scalar loss value (torch.Tensor)
+        """
         
-        
+        """
         # Use L2 distance
         dist_obj = torch.cdist(local_obj_proto, global_obj_proto, p=2).pow(2)
         dist_bg = torch.cdist(local_obj_proto, global_bg_proto, p=2).pow(2)
@@ -181,12 +182,28 @@ class PrototypeContrastiveLoss(nn.Module):
         # Labels: positives are always in the first block (object prototypes)
         labels = torch.zeros(logits.size(0), dtype=torch.long, device=logits.device)
 
+        """
+        raise NotImplementedError("Contrastive ")
+        """
+        local = F.normalize(local_obj_proto, dim=1) 
+        obj = F.normalize(global_obj_proto, dim=1) 
+        bg = F.normalize(global_bg_proto, dim=1) 
+        
+        # Cosine similarity (equivalent to dot product of normalized vectors)
+        sim_obj = local @ obj.t() # (N, M) 
+        sim_bg = local @ bg.t() # (N, K) 
+        
+        # Concatenate logits 
+        logits = torch.cat( [sim_obj / self.temperature, sim_bg / self.temperature], dim=1 )
+        
+        # Labels: positives are in the first block 
+        labels = torch.zeros(logits.size(0), dtype=torch.long, device=logits.device)
+
         # Cross-entropy InfoNCE loss
         loss = F.cross_entropy(logits, labels)
         return loss
         """
-        raise NotImplementedError("Currently not implemented.")
-
+        
 
 class RotatedBboxLoss(BboxLoss):
     """Criterion class for computing training losses for rotated bounding boxes."""
@@ -303,7 +320,7 @@ class v8DetectionLoss:
 
     def __call__(self, preds: Any, embds: list, batch: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
         """Calculate the sum of the loss for box, cls and dfl multiplied by batch size."""
-        loss = torch.zeros(5, device=self.device)  # box, cls, dfl, ptl, bgl, contrastive loss 
+        loss = torch.zeros(5, device=self.device)  # box, cls, dfl, ptl, bgl, (contrastive loss) 
         feats = preds[1] if isinstance(preds, tuple) else preds
         pred_distri, pred_scores = torch.cat([xi.view(feats[0].shape[0], self.no, -1) for xi in feats], 2).split(
             (self.reg_max * 4, self.nc), 1
@@ -375,9 +392,10 @@ class v8DetectionLoss:
                 _, bg_distances = assign_local2global_proto(local_proto=local_bg_proto, global_proto=self.global_bg_proto, return_distances=True)
                 assert len(bg_distances.shape) == 1 and bg_distances.shape[0] == local_bg_proto.shape[0]
                 loss[4] = bg_distances.mean()
-                #loss[5] = self.pt_contr_loss(local_obj_proto=local_obj_proto, global_obj_proto=self.global_obj_proto, global_bg_proto=self.global_bg_proto)
             else:
                 raise NotImplementedError("Currently only L2 distance is supported.")
+            
+            #loss[5] = self.pt_contr_loss(local_obj_proto=local_obj_proto, global_obj_proto=self.global_obj_proto, global_bg_proto=self.global_bg_proto)
 
     
         loss[0] *= self.hyp.box  # box gain
@@ -385,7 +403,7 @@ class v8DetectionLoss:
         loss[2] *= self.hyp.dfl  # dfl gain
         loss[3] *= self.hyp.ptl  # ptl gain
         loss[4] *= self.hyp.bgl  # bgl gain
-       #loss[5] *= self.hyp.pt_contr_loss  # contrastive loss gain
+        #loss[5] *= self.hyp.pt_contr_loss  # contrastive loss gain
 
         return loss * batch_size, loss.detach()  # loss(box, cls, dfl, ptl, bgl)
 
