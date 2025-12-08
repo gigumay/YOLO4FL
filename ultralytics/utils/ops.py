@@ -177,13 +177,15 @@ def agg_features(features: torch.Tensor, n_protos: int, is_training: bool=True, 
     return proto
 
 
-def generate_proto(embds: list, hyp: SimpleNamespace, aggregate: bool, is_training: bool, gt_bboxes: torch.Tensor=None, 
-                   msa: torchvision.ops.MultiScaleRoIAlign=None, obj_clustering_algrthm: KMeans=None, use_background: bool=False, 
-                   bg_clustering_algrthm: KMeans=None, all_preds: torch.Tensor=None, all_scores: torch.Tensor=None):
+def generate_protos(embds: list, hyp: SimpleNamespace, aggregate: bool, is_training: bool, gt_bboxes: torch.Tensor=None, msa: torchvision.ops.MultiScaleRoIAlign=None,
+                    obj_clustering_algrthm: KMeans=None, use_background: bool=False, bg_clustering_algrthm: KMeans=None,  all_preds: torch.Tensor=None, 
+                    all_scores: torch.Tensor=None) -> dict:
     """
-    Generate prototypes from neck output feature maps (P3-P5).
+    Generate prototypes from neck and head output feature maps (P3-P5).
     Args:
-        embds (list):                                       List of feature maps from the neck with shapes [(N,C1,W1,H1), (N,C2,W2,H2), (N,C3,W3,H3)].
+        embds (list):                                       List of feature maps from the neck and head. This method expects the following structure:
+                                                            [(N,C1,W1,H1), (N,C2,W2,H2), (N,C3,W3,H3), [(M,C1,W1,H1), (M,C2,W2,H2), (M,C3,W3,H3)]], where the 
+                                                            last element (the list) contains the feature maps from the head.
         hyp (SimpleNamespace):                              Hyperparameters including 'isolate_objects' (bool) and 'n_protos' (int).
         aggregate (bool):                                   Whether to aggregate features into prototypes.
         is_training (bool):                                 Whether the model is in training mode. Clustering is not supported during training.
@@ -197,19 +199,25 @@ def generate_proto(embds: list, hyp: SimpleNamespace, aggregate: bool, is_traini
         all_scores (torch.Tensor, optional):                Confidence scores with shape (bs, num_boxes, 1). Required if 'use_background' is True.
         imgsz (int):                                        Image size.
     Returns:
-        Generated prototypes with shape (n_protos, C) if 'aggregate' is True, otherwise (total_boxes, C).
+        A dictionary containing the generated prototypes for the neck and head, with shape (n_protos, C) if 'aggregate' is True, otherwise (total_boxes, C).
     """
     assert not (use_background and (all_preds is None or all_scores is None)), "'all_preds' and 'all_scores' must be provided when 'use_background' is True"
+    assert len(embds) == 4, f"Expected 4 elements in 'embds', got {len(embds)}"
+    
+    embds_backbone = embds[:3]
+    embds_head = embds[3]
 
-    features, _ = get_features(embds=embds, hyp=hyp, gt_bboxes=gt_bboxes, msa=msa, use_background=use_background, all_preds=all_preds, all_scores=all_scores)  # (total_boxes, C) or (N, C)
+    features_backbone, _ = get_features(embds=embds_backbone, hyp=hyp, gt_bboxes=gt_bboxes, msa=msa, use_background=use_background, all_preds=all_preds, all_scores=all_scores)  # (total_boxes, C) or (N, C)
+    features_head, _ = get_features(embds=embds_head, hyp=hyp, gt_bboxes=gt_bboxes, msa=msa, use_background=use_background, all_preds=all_preds, all_scores=all_scores)  # (total_boxes, C) or (N, C)
 
     if not aggregate:
-        return features
+        return {"backbone": features_backbone, "head": features_head}
     else:
-        if not use_background:
-            return agg_features(features=features, n_protos=hyp.n_obj_protos, is_training=is_training, clustering_algrthm=obj_clustering_algrthm)
-        else: 
-            return agg_features(features=features, n_protos=hyp.n_bg_protos, is_training=is_training, clustering_algrthm=bg_clustering_algrthm)
+        n_protos = hyp.n_obj_protos if not use_background else hyp.n_bg_protos
+        clustering_algrthm = obj_clustering_algrthm if not use_background else bg_clustering_algrthm
+        agg_backbone = agg_features(features=features_backbone, n_protos=n_protos, is_training=is_training, clustering_algrthm=clustering_algrthm)
+        agg_head = agg_features(features=features_head, n_protos=n_protos, is_training=is_training, clustering_algrthm=clustering_algrthm)
+        return {"backbone": agg_backbone, "head": agg_head}
     
 
 def assign_local2global_proto(local_proto: torch.Tensor, global_proto: torch.Tensor, return_distances: bool):

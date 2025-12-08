@@ -11,7 +11,7 @@ from typing import Union
 from collections import OrderedDict
 
 from ultralytics.utils.metrics import OKS_SIGMA
-from ultralytics.utils.ops import crop_mask, xywh2xyxy, xyxy2xywh, generate_proto, assign_local2global_proto
+from ultralytics.utils.ops import crop_mask, xywh2xyxy, xyxy2xywh, generate_protos, assign_local2global_proto
 from ultralytics.utils.tal import RotatedTaskAlignedAssigner, TaskAlignedAssigner, dist2bbox, dist2rbox, make_anchors
 from ultralytics.utils.torch_utils import autocast
 
@@ -274,10 +274,18 @@ class v8DetectionLoss:
                                                                                                 sampling_ratio=self.hyp.msa_sampling_ratio,
                                                                                                 canonical_scale=self.hyp.msa_canonical_scale, 
                                                                                                 canonical_level=self.hyp.msa_canonical_level)
-        self.global_obj_proto = torch.load(self.hyp.global_obj_proto).to(device)
-        assert len(self.global_obj_proto.shape) == 2 and self.global_obj_proto.shape[0] == self.hyp.n_obj_protos
-        self.global_bg_proto = torch.load(self.hyp.global_bg_proto).to(device)
-        assert len(self.global_bg_proto.shape) == 2 and self.global_bg_proto.shape[0] == self.hyp.n_bg_protos
+        # load global prototypes
+        self.global_obj_protos = {"backbone": torch.load(self.hyp.global_obj_protos["backbone"]).to(device),
+                                  "head": torch.load(self.hyp.global_obj_protos["head"]).to(device)}
+        for v in self.global_obj_protos.values():
+            assert len(v.shape) == 2 and v.shape[0] == self.hyp.n_obj_protos
+
+        # load global prototypes
+        self.global_bg_protos = {"backbone": torch.load(self.hyp.global_bg_protos["backbone"]).to(device),
+                                 "head": torch.load(self.hyp.global_bg_protos["head"]).to(device)}
+        for v in self.global_bg_protos.values():
+            assert len(v.shape) == 2 and v.shape[0] == self.hyp.n_obj_protos
+
         self.stride = m.stride  # model strides
         self.nc = m.nc  # number of classes
         self.no = m.nc + m.reg_max * 4
@@ -288,7 +296,7 @@ class v8DetectionLoss:
 
         self.assigner = TaskAlignedAssigner(topk=tal_topk, num_classes=self.nc, alpha=0.5, beta=6.0)
         self.bbox_loss = BboxLoss(m.reg_max).to(device)
-        self.pt_contr_loss = PrototypeContrastiveLoss(temperature=self.hyp.pt_temp).to(device)
+        #self.pt_contr_loss = PrototypeContrastiveLoss(temperature=self.hyp.pt_temp).to(device)
         self.proj = torch.arange(m.reg_max, dtype=torch.float, device=device)
 
     def preprocess(self, targets: torch.Tensor, batch_size: int, scale_tensor: torch.Tensor) -> torch.Tensor:
@@ -370,28 +378,42 @@ class v8DetectionLoss:
             )
 
         # generate batch prototypes
-        local_obj_proto = generate_proto(embds=embds,hyp=self.hyp,
-                                         aggregate=self.hyp.agg_features and self.hyp.n_obj_protos == 1,
-                                         is_training=True, gt_bboxes=gt_bboxes, msa=self.msa)
+        local_obj_protos = generate_protos(embds=embds,hyp=self.hyp,
+                                           aggregate=self.hyp.agg_features and self.hyp.n_obj_protos == 1,
+                                           is_training=True, gt_bboxes=gt_bboxes, msa=self.msa)
         
         if self.hyp.distance_metric == "l2":
-            _, obj_distances = assign_local2global_proto(local_proto=local_obj_proto, global_proto=self.global_obj_proto, return_distances=True)
-            assert len(obj_distances.shape) == 1 and obj_distances.shape[0] == local_obj_proto.shape[0]
-            loss[3] = obj_distances.mean() 
+            _, obj_distances_backbone = assign_local2global_proto(local_proto=local_obj_protos["backbone"], 
+                                                                  global_proto=self.global_obj_protos["backbone"], 
+                                                                  return_distances=True)
+            _, obj_distances_head = assign_local2global_proto(local_proto=local_obj_protos["head"], 
+                                                              global_proto=self.global_obj_protos["head"], 
+                                                              return_distances=True)
+            
+            assert len(obj_distances_backbone.shape) == 1 and obj_distances_backbone.shape[0] == local_obj_protos["backbone"].shape[0]
+            assert len(obj_distances_head.shape) == 1 and obj_distances_head.shape[0] == local_obj_protos["head"].shape[0]
+            loss[3] = obj_distances_backbone.mean() + obj_distances_head.mean() 
         else:
             raise NotImplementedError("Currently only L2 distance is supported.")
         
 
         if self.hyp.use_background:
-            local_bg_proto = generate_proto(embds=embds, hyp=self.hyp, 
-                                            aggregate=self.hyp.agg_features and self.hyp.n_bg_protos == 1,
-                                            is_training=True, gt_bboxes=gt_bboxes,msa=self.msa, use_background=True, 
-                                            all_preds=(pred_bboxes.detach() * stride_tensor).type(gt_bboxes.dtype),
-                                            all_scores=pred_scores.detach().sigmoid())
+            local_bg_protos = generate_protos(embds=embds, hyp=self.hyp, 
+                                              aggregate=self.hyp.agg_features and self.hyp.n_bg_protos == 1,
+                                              is_training=True, gt_bboxes=gt_bboxes,msa=self.msa, use_background=True, 
+                                              all_preds=(pred_bboxes.detach() * stride_tensor).type(gt_bboxes.dtype),
+                                              all_scores=pred_scores.detach().sigmoid())
             if self.hyp.distance_metric == "l2":
-                _, bg_distances = assign_local2global_proto(local_proto=local_bg_proto, global_proto=self.global_bg_proto, return_distances=True)
-                assert len(bg_distances.shape) == 1 and bg_distances.shape[0] == local_bg_proto.shape[0]
-                loss[4] = bg_distances.mean()
+                _, bg_distances_backbone = assign_local2global_proto(local_proto=local_bg_protos["backbone"],
+                                                                     global_proto=self.global_bg_protos["backbone"],
+                                                                     return_distances=True)
+                _, bg_distances_head = assign_local2global_proto(local_proto=local_bg_protos["head"],
+                                                                 global_proto=self.global_bg_protos["head"],
+                                                                 return_distances=True)
+                
+                assert len(bg_distances_backbone.shape) == 1 and bg_distances_backbone.shape[0] == local_bg_protos["backbone"].shape[0]
+                assert len(bg_distances_head.shape) == 1 and bg_distances_head.shape[0] == local_bg_protos["head"].shape[0]
+                loss[4] = bg_distances_backbone.mean() + bg_distances_head.mean()
             else:
                 raise NotImplementedError("Currently only L2 distance is supported.")
             

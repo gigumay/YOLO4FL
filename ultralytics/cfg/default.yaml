@@ -124,8 +124,8 @@ erasing: 0.4 # (float) probability of random erasing during classification train
 
 
 # Prototype Regularization ---------------------------------------------------------------------------------------------
-global_obj_proto:  # (str) path to the global object prototype file (.pt)
-global_bg_proto: None # (str) path to the global background prototype file (.pt)
+global_obj_protos:  # (dict) dictionary containing paths to the global object prototype files (.pt) for the backbone and head
+global_bg_protos: None # (dict) dictionary containing paths to the global background prototype files (.pt) for the backbone and head
 align_prototypes: # (bool) whether to enforce alignment with the global prototype during training 
 ptl: 1.0 # (float) Prototype loss gain
 bgl: 0.5 # (float) Background prototype loss gain 
