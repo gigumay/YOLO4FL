@@ -20,6 +20,8 @@ from scipy.optimize import linear_sum_assignment
 from ultralytics.utils import LOGGER
 from ultralytics.utils.metrics import batch_probiou, box_iou
 
+#TODO: This should ideally accept different embedding extraction points dynamically. Right now head and backbone are hardcoded.
+
 
 class Profile(contextlib.ContextDecorator):
     """
