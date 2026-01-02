@@ -30,7 +30,6 @@ class DetectionPredictor(BasePredictor):
         >>> predictor = DetectionPredictor(overrides=args)
         >>> predictor.predict_cli()
     """
-
     def postprocess(self, preds, img, orig_imgs, **kwargs):
         """
         Post-process predictions and return a list of Results objects.

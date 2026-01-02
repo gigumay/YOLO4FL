@@ -41,6 +41,8 @@ from typing import Any, Dict, List, Optional, Union
 import cv2
 import numpy as np
 import torch
+import torchvision
+import copy
 
 from ultralytics.cfg import get_cfg, get_save_dir
 from ultralytics.data import load_inference_source
@@ -50,6 +52,7 @@ from ultralytics.utils import DEFAULT_CFG, LOGGER, MACOS, WINDOWS, callbacks, co
 from ultralytics.utils.checks import check_imgsz, check_imshow
 from ultralytics.utils.files import increment_path
 from ultralytics.utils.torch_utils import select_device, smart_inference_mode
+from ultralytics.utils.ops import xywh2xyxy
 
 STREAM_WARNING = """
 inference results will accumulate in RAM unless `stream=True` is passed, causing potential out-of-memory
@@ -62,7 +65,6 @@ Example:
         masks = r.masks  # Masks object for segment masks outputs
         probs = r.probs  # Class probabilities for classification outputs
 """
-
 
 class BasePredictor:
     """
@@ -146,6 +148,10 @@ class BasePredictor:
         self.txt_path = None
         self._lock = threading.Lock()  # for automatic thread-safe inference
         callbacks.add_integration_callbacks(self)
+
+        self.msa = None
+        self.global_obj_protos = None
+        self.global_bg_protos = None
 
     def preprocess(self, im: Union[torch.Tensor, List[np.ndarray]]) -> torch.Tensor:
         """
@@ -296,6 +302,19 @@ class BasePredictor:
         if not self.model:
             self.setup_model(model)
 
+        # Setup MSA and global protos if required:
+        if self.args.weigh_by_dist:
+            if self.global_obj_protos is None:
+                self.global_obj_protos = torch.load(self.args.global_obj_protos)
+            if self.global_bg_protos is None:
+                self.global_bg_protos = torch.load(self.args.global_bg_protos)
+            if self.msa is None:
+                self.msa = torchvision.ops.MultiScaleRoIAlign(featmap_names=self.args.msa_layer_names, 
+                                                              output_size=self.args.msa_out_size,
+                                                              sampling_ratio=self.args.msa_sampling_ratio,
+                                                              canonical_scale=self.args.msa_canonical_scale,
+                                                              canonical_level=self.args.msa_canonical_level) 
+
         with self._lock:  # for thread-safe inference
             # Setup source every time predict is called
             self.setup_source(source if source is not None else self.args.source)
@@ -329,12 +348,27 @@ class BasePredictor:
                 # Inference
                 with profilers[1]:
                     preds = self.inference(im, *args, **kwargs)
-                    if self.args.embed and not self.args.return_all_preds:
+                    if self.args.embed and not (self.args.return_all_preds or self.args.weigh_by_dist):
                         yield from [preds] if isinstance(preds, torch.Tensor) else preds  # yield embedding tensors
                         continue
-                    if self.args.embed and self.args.return_all_preds:
+                    if self.args.embed and self.args.return_all_preds and not self.args.wigh_by_dist:
                         yield preds
                         continue
+                    if self.args.weigh_by_dist:
+                        assert self.args.return_all_preds and self.args.embed
+                        assert preds[0].shape[0] == 1, "Found batch size > 1. This was not explicitly accounted for!"
+
+                        preds_cp = copy.deepcopy(preds[0])
+                        pred_bxs_wh = preds_cp[0][:, :4, :]
+                        pred_bxs_wh = pred_bxs_wh.permute(0, 2, 1).squeeze(0)
+                        pred_bxs = xywh2xyxy(pred_bxs_wh)
+                        # I clamp here instead of removing nonsense boxes becasue in the end I need to multiply with the conference scores
+                        pred_bxs.clamp_(min=0.0, max=float(self.args.imgsz))
+
+                        embds = preds[1]
+
+                        CONTINUE HERE
+
 
                 # Postprocess
                 with profilers[2]:

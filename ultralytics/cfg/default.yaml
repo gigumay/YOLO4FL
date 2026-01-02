@@ -66,6 +66,15 @@ classes: # (int | list[int], optional) filter results by class, i.e. classes=0, 
 retina_masks: False # (bool) use high-resolution segmentation masks
 embed: # (list[int], optional) return feature vectors/embeddings from given layers
 return_all_preds: False # (bool) if True all predictions as generated before pre-processing will be returned
+weigh_by_dist: False # (bool) if True, confidence scores are wieghted by distance to 
+global_obj_protos: None # (str) path to the global object prototype file (.pt) to us efor distance weighing
+global_bg_protos: None # (str) path to the global background prototype file (.pt) to us efor distance weighing
+msa_out_size: 7 # (int) object feature map size 
+msa_sampling_ratio: 2 # (int) sampling ratio for RoI alignment
+msa_canonical_level: 3 # (int) FPN level from which objects of size canonical_scale x canonical_scale should be pooled from
+msa_canonical_scale: 50 # (int) canonical scale
+msa_layer_names: # (list) names of the layers to use for the msa feature extraction
+
 
 # Visualize settings ---------------------------------------------------------------------------------------------------
 show: False # (bool) show predicted images and videos if environment allows

@@ -186,7 +186,11 @@ class BaseModel(torch.nn.Module):
                 feature_visualization(x, m.type, m.i, save_dir=visualize)
             if m.i in embed:
                 #embeddings.append(torch.nn.functional.adaptive_avg_pool2d(x, (1, 1)).squeeze(-1).squeeze(-1))  # flatten
-                embeddings.append(x)
+                if m.i == 23 and not self.training:
+                    assert len(x) == 2 and len(x[1]) == 3
+                    embeddings.append(x[1])
+                else:
+                    embeddings.append(x)
                 if m.i == max_idx:
                     #return torch.unbind(torch.cat(embeddings, 1), dim=0)
                     return embeddings
@@ -195,7 +199,7 @@ class BaseModel(torch.nn.Module):
 
     def _predict_once_return_all(self, x, profile=False, visualize=False, embed=None):
         """
-        Perform a forward pass through the network.
+        Perform a forward pass through the network. Return embeddigns AND predictions
 
         Args:
             x (torch.Tensor): The input tensor to the model.
@@ -219,7 +223,11 @@ class BaseModel(torch.nn.Module):
                 feature_visualization(x, m.type, m.i, save_dir=visualize)
             if m.i in embed:
                 #embeddings.append(torch.nn.functional.adaptive_avg_pool2d(x, (1, 1)).squeeze(-1).squeeze(-1))  # flatten
-                embeddings.append(x)
+                if m.i == 23 and not self.training:
+                    assert len(x) == 2 and len(x[1]) == 3
+                    embeddings.append(x[1])
+                else:
+                    embeddings.append(x)
             
         return [x[0], embeddings]
 
