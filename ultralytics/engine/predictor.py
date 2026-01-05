@@ -37,6 +37,7 @@ import re
 import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
+from collections import OrderedDict
 
 import cv2
 import numpy as np
@@ -52,7 +53,7 @@ from ultralytics.utils import DEFAULT_CFG, LOGGER, MACOS, WINDOWS, callbacks, co
 from ultralytics.utils.checks import check_imgsz, check_imshow
 from ultralytics.utils.files import increment_path
 from ultralytics.utils.torch_utils import select_device, smart_inference_mode
-from ultralytics.utils.ops import xywh2xyxy
+from ultralytics.utils.ops import xywh2xyxy, flatten_features
 
 STREAM_WARNING = """
 inference results will accumulate in RAM unless `stream=True` is passed, causing potential out-of-memory
@@ -305,15 +306,19 @@ class BasePredictor:
         # Setup MSA and global protos if required:
         if self.args.weigh_by_dist:
             if self.global_obj_protos is None:
-                self.global_obj_protos = torch.load(self.args.global_obj_protos)
+                self.global_obj_protos = torch.load(self.args.global_obj_protos[self.args.ptt_extraction_pt])
             if self.global_bg_protos is None:
-                self.global_bg_protos = torch.load(self.args.global_bg_protos)
+                self.global_bg_protos = torch.load(self.args.global_bg_protos[self.args.ptt_extraction_pt])
             if self.msa is None:
                 self.msa = torchvision.ops.MultiScaleRoIAlign(featmap_names=self.args.msa_layer_names, 
                                                               output_size=self.args.msa_out_size,
                                                               sampling_ratio=self.args.msa_sampling_ratio,
                                                               canonical_scale=self.args.msa_canonical_scale,
                                                               canonical_level=self.args.msa_canonical_level) 
+            self.args.return_all_preds = True
+            assert self.args.embed == [16, 19, 22], "Current logic assumes usage of backbone features at inference time!" \
+                                                    "Double check before chaning this and removing this assertion!"
+                        
 
         with self._lock:  # for thread-safe inference
             # Setup source every time predict is called
@@ -348,26 +353,34 @@ class BasePredictor:
                 # Inference
                 with profilers[1]:
                     preds = self.inference(im, *args, **kwargs)
+
                     if self.args.embed and not (self.args.return_all_preds or self.args.weigh_by_dist):
                         yield from [preds] if isinstance(preds, torch.Tensor) else preds  # yield embedding tensors
                         continue
-                    if self.args.embed and self.args.return_all_preds and not self.args.wigh_by_dist:
+                    if self.args.embed and self.args.return_all_preds and not self.args.weigh_by_dist:
                         yield preds
                         continue
                     if self.args.weigh_by_dist:
-                        assert self.args.return_all_preds and self.args.embed
                         assert preds[0].shape[0] == 1, "Found batch size > 1. This was not explicitly accounted for!"
+                        assert preds[0].shape[1] == 5, "Multi-Class case not supported at the moment"
 
-                        preds_cp = copy.deepcopy(preds[0])
-                        pred_bxs_wh = preds_cp[0][:, :4, :]
+                        pred_bxs_cp = copy.deepcopy(preds[0])
+                        pred_bxs_wh = pred_bxs_cp[:, :4, :]
                         pred_bxs_wh = pred_bxs_wh.permute(0, 2, 1).squeeze(0)
                         pred_bxs = xywh2xyxy(pred_bxs_wh)
                         # I clamp here instead of removing nonsense boxes becasue in the end I need to multiply with the conference scores
                         pred_bxs.clamp_(min=0.0, max=float(self.args.imgsz))
 
                         embds = preds[1]
+                        maps = OrderedDict({f"P{i+3}": fm for i, fm in enumerate(embds)})
+                        features_3D = self.msa.forward(x=maps,  boxes=[pred_bxs], image_shapes=[(self.args.imgsz, self.args.imgsz)]*self.args.batch)
+                        features_flattened = flatten_features(features=features_3D)
 
-                        CONTINUE HERE
+                        dist2obj, _ = torch.cdist(features_flattened, self.global_obj_protos, p=2).min(dim=1)
+                        dist2bg, _ = torch.cdist(features_flattened, self.global_bg_protos, p=2).min(dim=1) 
+                        # which column is confidence? 
+                        pass
+
 
 
                 # Postprocess
