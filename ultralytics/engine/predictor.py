@@ -282,11 +282,10 @@ class BasePredictor:
         self.vid_writer = {}
 
 
-
-    def scale_preds_by_dist(self, preds: torch.Tensor, d_obj: torch.Tensor, d_bg: torch.Tensor, beta: float = 1.0):
+    def do_scaling(self, preds: torch.Tensor, d_obj: torch.Tensor, d_bg: torch.Tensor, beta: float) -> torch.Tensor:
         """
-        Inference-only Bayesian confidence update.
-
+        Logic for scaling predictions based on distances.
+        
         Args:
             preds: Tensor of shape (1, 5, n)
             d_obj: Tensor of shape (n,)
@@ -296,7 +295,6 @@ class BasePredictor:
         Returns:
             preds_out: Tensor of shape (1, 5, n)
         """
-
         preds_out = preds.clone()
 
         # Confidence scores
@@ -318,6 +316,37 @@ class BasePredictor:
         return preds_out
 
 
+    def scale_preds_by_dist(self, preds: list):
+        """
+        Scale predictions based on distances to global prototypes.
+
+        Args:
+            preds: list of lenght 2
+                - preds[0]: Tensor of shape (1, 5, n)
+                - preds[1]: list of lenght 3 with embedding tensors
+
+        Returns:
+            Tensor of shape (1, 5, n)
+        """
+
+        pred_bxs_cp = copy.deepcopy(preds[0])
+        pred_bxs_wh = pred_bxs_cp[:, :4, :]
+        pred_bxs_wh = pred_bxs_wh.permute(0, 2, 1).squeeze(0)
+        pred_bxs = xywh2xyxy(pred_bxs_wh)
+        # I clamp here instead of removing nonsense boxes becasue in the end I need to multiply with the conference scores
+        pred_bxs.clamp_(min=0.0, max=float(self.args.imgsz))
+
+        embds = preds[1]
+        maps = OrderedDict({f"P{i+3}": fm for i, fm in enumerate(embds)})
+        features_3D = self.msa.forward(x=maps,  boxes=[pred_bxs], image_shapes=[(self.args.imgsz, self.args.imgsz)]*self.args.batch)
+        features_flattened = flatten_features(features=features_3D)
+
+        dist2obj, _ = torch.cdist(features_flattened, self.global_obj_protos, p=2).min(dim=1)
+        dist2bg, _ = torch.cdist(features_flattened, self.global_bg_protos, p=2).min(dim=1) 
+
+        return self.do_scaling(preds=preds[0], d_obj=dist2obj, d_bg=dist2bg, beta=self.args.dist_scaling_temp)
+
+    
 
     @smart_inference_mode()
     def stream_inference(self, source=None, model=None, *args, **kwargs):
@@ -400,25 +429,8 @@ class BasePredictor:
                     if self.args.scale_by_dist:
                         assert preds[0].shape[0] == 1, "Found batch size > 1. This was not explicitly accounted for!"
                         assert preds[0].shape[1] == 5, "Multi-Class case not supported at the moment"
-
-                        pred_bxs_cp = copy.deepcopy(preds[0])
-                        pred_bxs_wh = pred_bxs_cp[:, :4, :]
-                        pred_bxs_wh = pred_bxs_wh.permute(0, 2, 1).squeeze(0)
-                        pred_bxs = xywh2xyxy(pred_bxs_wh)
-                        # I clamp here instead of removing nonsense boxes becasue in the end I need to multiply with the conference scores
-                        pred_bxs.clamp_(min=0.0, max=float(self.args.imgsz))
-
-                        embds = preds[1]
-                        maps = OrderedDict({f"P{i+3}": fm for i, fm in enumerate(embds)})
-                        features_3D = self.msa.forward(x=maps,  boxes=[pred_bxs], image_shapes=[(self.args.imgsz, self.args.imgsz)]*self.args.batch)
-                        features_flattened = flatten_features(features=features_3D)
-
-                        dist2obj, _ = torch.cdist(features_flattened, self.global_obj_protos, p=2).min(dim=1)
-                        dist2bg, _ = torch.cdist(features_flattened, self.global_bg_protos, p=2).min(dim=1) 
-
-                        preds[0] = self.scale_preds_by_dist(preds=preds[0], d_obj=dist2obj, d_bg=dist2bg, beta=self.args.dist_scaling_temp)
-
-
+                        
+                        preds[0] = self.scale_preds_by_dist(preds=preds)
 
                 # Postprocess
                 with profilers[2]:
