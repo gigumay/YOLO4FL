@@ -281,6 +281,44 @@ class BasePredictor:
             LOGGER.warning(STREAM_WARNING)
         self.vid_writer = {}
 
+
+
+    def scale_preds_by_dist(self, preds: torch.Tensor, d_obj: torch.Tensor, d_bg: torch.Tensor, beta: float = 1.0):
+        """
+        Inference-only Bayesian confidence update.
+
+        Args:
+            preds: Tensor of shape (1, 5, n)
+            d_obj: Tensor of shape (n,)
+            d_bg:  Tensor of shape (n,)
+            beta:  Effect strength
+
+        Returns:
+            preds_out: Tensor of shape (1, 5, n)
+        """
+
+        preds_out = preds.clone()
+
+        # Confidence scores
+        c = preds[0, 4, :]
+
+        # Optional but recommended safety clamp
+        c = c.clamp(1e-6, 1.0 - 1e-6)
+
+        # Distance affinities
+        w_obj = torch.exp(-beta * d_obj)
+        w_bg = torch.exp(-beta * d_bg)
+
+        # Bayesian update
+        numerator = c * w_obj
+        denom = numerator + (1.0 - c) * w_bg
+
+        preds_out[0, 4, :] = numerator / denom
+
+        return preds_out
+
+
+
     @smart_inference_mode()
     def stream_inference(self, source=None, model=None, *args, **kwargs):
         """
@@ -304,11 +342,11 @@ class BasePredictor:
             self.setup_model(model)
 
         # Setup MSA and global protos if required:
-        if self.args.weigh_by_dist:
+        if self.args.scale_by_dist:
             if self.global_obj_protos is None:
-                self.global_obj_protos = torch.load(self.args.global_obj_protos[self.args.ptt_extraction_pt])
+                self.global_obj_protos = torch.load(self.args.global_obj_protos[self.args.ptt_extraction_point])
             if self.global_bg_protos is None:
-                self.global_bg_protos = torch.load(self.args.global_bg_protos[self.args.ptt_extraction_pt])
+                self.global_bg_protos = torch.load(self.args.global_bg_protos[self.args.ptt_extraction_point])
             if self.msa is None:
                 self.msa = torchvision.ops.MultiScaleRoIAlign(featmap_names=self.args.msa_layer_names, 
                                                               output_size=self.args.msa_out_size,
@@ -316,9 +354,8 @@ class BasePredictor:
                                                               canonical_scale=self.args.msa_canonical_scale,
                                                               canonical_level=self.args.msa_canonical_level) 
             self.args.return_all_preds = True
-            assert self.args.embed == [16, 19, 22], "Current logic assumes usage of backbone features at inference time!" \
-                                                    "Double check before chaning this and removing this assertion!"
-                        
+            assert self.args.embed == [16, 19, 22] and self.args.ptt_extraction_point == "backbone", "Current logic assumes usage of backbone features at inference time!" \
+                                                                                                     "Double check before chaning this and removing this assertion!"
 
         with self._lock:  # for thread-safe inference
             # Setup source every time predict is called
@@ -354,13 +391,13 @@ class BasePredictor:
                 with profilers[1]:
                     preds = self.inference(im, *args, **kwargs)
 
-                    if self.args.embed and not (self.args.return_all_preds or self.args.weigh_by_dist):
+                    if self.args.embed and not (self.args.return_all_preds or self.args.scale_by_dist):
                         yield from [preds] if isinstance(preds, torch.Tensor) else preds  # yield embedding tensors
                         continue
-                    if self.args.embed and self.args.return_all_preds and not self.args.weigh_by_dist:
+                    if self.args.embed and self.args.return_all_preds and not self.args.scale_by_dist:
                         yield preds
                         continue
-                    if self.args.weigh_by_dist:
+                    if self.args.scale_by_dist:
                         assert preds[0].shape[0] == 1, "Found batch size > 1. This was not explicitly accounted for!"
                         assert preds[0].shape[1] == 5, "Multi-Class case not supported at the moment"
 
@@ -378,8 +415,8 @@ class BasePredictor:
 
                         dist2obj, _ = torch.cdist(features_flattened, self.global_obj_protos, p=2).min(dim=1)
                         dist2bg, _ = torch.cdist(features_flattened, self.global_bg_protos, p=2).min(dim=1) 
-                        # which column is confidence? 
-                        pass
+
+                        preds[0] = self.scale_preds_by_dist(preds=preds[0], d_obj=dist2obj, d_bg=dist2bg, beta=self.args.dist_scaling_temp)
 
 
 

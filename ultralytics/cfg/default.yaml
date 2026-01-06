@@ -66,13 +66,14 @@ classes: # (int | list[int], optional) filter results by class, i.e. classes=0, 
 retina_masks: False # (bool) use high-resolution segmentation masks
 embed: # (list[int], optional) return feature vectors/embeddings from given layers
 return_all_preds: False # (bool) if True all predictions as generated before pre-processing will be returned
-weigh_by_dist: False # (bool) if True, confidence scores are wieghted by distance to global prototypes
-ptt_extraction_point: "backbone" # (str) point of the network from which to use prototypes for distance weighing
+scale_by_dist: False # (bool) if True, confidence scores are scaled by distance to global prototypes
+ptt_extraction_point: "backbone" # (str) point of the network from which to use prototypes for distance scaling
 msa_out_size: 7 # (int) object feature map size 
 msa_sampling_ratio: 2 # (int) sampling ratio for RoI alignment
 msa_canonical_level: 3 # (int) FPN level from which objects of size canonical_scale x canonical_scale should be pooled from
 msa_canonical_scale: 50 # (int) canonical scale
 msa_layer_names: ["P3", "P4", "P5"] # (list) names of the layers to use for the msa feature extraction
+dist_scaling_temp: 1.0 # (float) temperature for distance sclaing of predictions
 
 # Inference + Training shared settings ---------------------------------------------------------------------------------------------------
 global_obj_protos:  # (dict) dictionary containing paths to the global object prototype files (.pt) for the backbone and head
