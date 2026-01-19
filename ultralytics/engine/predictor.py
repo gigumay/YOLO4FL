@@ -383,8 +383,9 @@ class BasePredictor:
                                                               canonical_scale=self.args.msa_canonical_scale,
                                                               canonical_level=self.args.msa_canonical_level) 
             self.args.return_all_preds = True
-            assert self.args.embed == [16, 19, 22] and self.args.ptt_extraction_point == "backbone", "Current logic assumes usage of backbone features at inference time!" \
-                                                                                                     "Double check before chaning this and removing this assertion!"
+            self.args.embed = [16, 19, 22] 
+            assert self.args.ptt_extraction_point == "backbone", "Current logic assumes usage of backbone features at inference time!" \
+                                                                 "Double check before chaning this and removing this assertion!"
 
         with self._lock:  # for thread-safe inference
             # Setup source every time predict is called
