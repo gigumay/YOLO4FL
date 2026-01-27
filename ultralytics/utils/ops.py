@@ -148,7 +148,8 @@ def get_features(embds: list, hyp: SimpleNamespace, gt_bboxes: torch.Tensor=None
         if not use_background:
             box_list = get_obj_boxes(gt_bboxes=gt_bboxes, box_padding=hyp.msa_box_padding)
         else:
-            box_list, deficit = sample_empty_boxes(gt_bboxes=gt_bboxes, pred_bboxes=all_preds, pred_scores=all_scores, hn_ratio=hyp.hn_ratio_bg, imgsz=hyp.imgsz)
+            box_list, deficit = sample_empty_boxes(gt_bboxes=gt_bboxes, pred_bboxes=all_preds, pred_scores=all_scores, hn_ratio=hyp.hn_ratio_bg, 
+                                                   imgsz=hyp.imgsz, use_all=hyp.use_all_bg)
             background_deficit = deficit
         
         features_3D = msa.forward(x=maps,  boxes=box_list, image_shapes=[(hyp.imgsz, hyp.imgsz)]*hyp.batch)
@@ -370,7 +371,7 @@ def get_empty_boxes(preds, gt, pred_scores, iou_eps, imgsz):
     return empty_boxes, empty_scores, all_empty_idx
 
 
-def sample_from_empty(empty_boxes, empty_scores, all_empty_idx, num_gt, hn_ratio):
+def sample_from_empty(empty_boxes, empty_scores, all_empty_idx, num_gt, hn_ratio, use_all):
     """
     Sample empty boxes based on the number of ground truth boxes and hard negative ratio.
     Args:
@@ -379,10 +380,25 @@ def sample_from_empty(empty_boxes, empty_scores, all_empty_idx, num_gt, hn_ratio
         all_empty_idx (torch.Tensor):   Indices of empty boxes in the original preds tensor of shape (K,).
         num_gt (int):                   Number of ground truth boxes.
         hn_ratio (float):               Ratio of hard negatives to sample.
+        use_all (bool):                 Whether to use all available empty boxes without sampling.
     Returns:
         sampled_boxes (torch.Tensor):   Sampled empty bounding boxes of shape (T, 4).
         sel_idx (torch.Tensor):         Indices of sampled boxes in the original empty_boxes tensor of shape (T,).
     """
+    if use_all: 
+        if empty_boxes.numel() == 0:
+            return (
+                torch.empty((0, 4), device=empty_boxes.device),
+                torch.tensor([], dtype=torch.long, device=empty_boxes.device),
+            )
+        sel_idx = torch.arange(
+            empty_boxes.shape[0],
+            device=empty_boxes.device,
+            dtype=torch.long,
+        )
+        return empty_boxes, sel_idx
+
+
     available = empty_boxes.shape[0]
     take = min(num_gt, available)
 
@@ -514,7 +530,7 @@ def redistribute_deficit(capacities, total_deficit, empty_boxes_all, empty_score
 
 
 def sample_empty_boxes(gt_bboxes: torch.Tensor, pred_bboxes: torch.Tensor, pred_scores: torch.Tensor, hn_ratio: float,
-                       imgsz: int, iou_eps: float = 1e-5):
+                       imgsz: int, iou_eps: float = 1e-5, use_all: bool=False):
     """
     Sample empty bounding boxes for each image in the batch based on ground truth boxes and hard negative ratio.
     Args:
@@ -524,6 +540,7 @@ def sample_empty_boxes(gt_bboxes: torch.Tensor, pred_bboxes: torch.Tensor, pred_
         hn_ratio (float):            Ratio of hard negatives to sample.
         imgsz (int):                 Image size. 
         iou_eps (float):             IoU threshold to consider a box as empty.
+        use_all (bool):              Whether to use all available empty boxes without sampling.
     Returns:
         empty_boxes_per_img (list):  List of sampled empty bounding boxes per image, each of shape (T_i, 4).
     """
@@ -551,7 +568,8 @@ def sample_empty_boxes(gt_bboxes: torch.Tensor, pred_bboxes: torch.Tensor, pred_
 
         # sampled empties
         sampled_boxes, sel_idx = sample_from_empty(empty_boxes=empty_boxes, empty_scores=empty_scores, 
-                                                   all_empty_idx=all_empty_idx, num_gt=num_gt, hn_ratio=hn_ratio)
+                                                   all_empty_idx=all_empty_idx, num_gt=num_gt, hn_ratio=hn_ratio,
+                                                   use_all=use_all)
 
         empty_boxes_per_img[b] = sampled_boxes
         selected_indices_per_img[b] = sel_idx

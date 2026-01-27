@@ -148,6 +148,7 @@ n_bg_protos: 100 # (int) number of background prototypes (embeddign clusters) to
 agg_features: False # (bool) if True, features will be averaged before computing the distance to the global protoype when n_protos == 1
 use_background: False # (bool) if True, background features will be used as negative samples during prototype alignment
 hn_ratio_bg: 1.0 # (float) ratio of hard negative (vs. random) background features to sample
+use_all_bg: False # (bool) if True, all available background features will be used during prototype generation without sampling
 
 
 # MultiScaleRoIAligner settings ----------------------------------------------------------------------------------------
