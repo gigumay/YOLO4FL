@@ -284,7 +284,7 @@ class v8DetectionLoss:
         self.global_bg_protos = {"backbone": torch.load(self.hyp.global_bg_protos["backbone"]).to(device),
                                  "head": torch.load(self.hyp.global_bg_protos["head"]).to(device)}
         for v in self.global_bg_protos.values():
-            assert len(v.shape) == 2 and v.shape[0] == self.hyp.n_obj_protos
+            assert len(v.shape) == 2 and v.shape[0] == self.hyp.n_bg_protos
 
         self.stride = m.stride  # model strides
         self.nc = m.nc  # number of classes
