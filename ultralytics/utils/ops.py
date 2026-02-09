@@ -290,6 +290,8 @@ def prototype_matching(prototypes, n_orders=10):
         best_clusters (torch.Tensor):   Clustered prototypes with shape (n_clusters, n_protos, C).
         best_total_cost (float):        Total cost associated with the best clustering.
     """
+    raise NotImplementedError("Outdated")
+
     best_total_cost = np.inf
     best_clusters = None
     
