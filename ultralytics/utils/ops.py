@@ -218,7 +218,7 @@ def cluster_features(feats: np.ndarray) -> tuple[np.ndarray, float]:
     return np.vstack(centers), score
 
 
-def agg_features(features: torch.Tensor, cluster: bool, is_training: bool=True):
+def agg_features(features: torch.Tensor, cluster: bool, is_training: bool=True) -> tuple[torch.tensor, float]:
     """
     Aggregate features into prototypes via mean or clustering.
     Args:
@@ -226,25 +226,26 @@ def agg_features(features: torch.Tensor, cluster: bool, is_training: bool=True):
         cluster (bool):                         if True, features will be clustered instead of averaged. 
         is_training (bool):                     Whether the model is in training mode. Clustering is not supported during training.
     Returns:
-        Aggregated prototypes with shape (1-n, C).
+        Aggregated prototypes with shape (1-n, C), and clustering score if applicable.
     """
     if not cluster:
         proto = features.mean(dim=0, keepdim=True)
+        score = math.nan
     else:
         assert not is_training, "Clustering during training currently not supported"
         features_np = features.detach().cpu().numpy()
-        clusters = cluster_features(feats=features_np)
+        clusters, score = cluster_features(feats=features_np)
         proto = torch.from_numpy(clusters).to(device=features.device, dtype=features.dtype)
 
     assert len(proto.shape) == 2, f"Unexpected output shape: {proto.shape}"   
     assert proto.shape[1] == features.shape[1] 
-    return proto
+    return proto, score
 
 
-def generate_protos(embds: list, hyp: SimpleNamespace, gt_bboxes: torch.Tensor=None, msa: torchvision.ops.MultiScaleRoIAlign=None,
-                    use_background: bool=False,   all_preds: torch.Tensor=None, all_scores: torch.Tensor=None) -> dict:
+def generate_protos_train(embds: list, hyp: SimpleNamespace, gt_bboxes: torch.Tensor=None, msa: torchvision.ops.MultiScaleRoIAlign=None,
+                          use_background: bool=False,   all_preds: torch.Tensor=None, all_scores: torch.Tensor=None) -> dict:
     """
-    Generate prototypes from neck and head output feature maps (P3-P5).
+    Generate prototypes from neck and head output feature maps (P3-P5) during training.
     Args:
         embds (list):                                       List of feature maps from the neck and head. This method expects the following structure:
                                                             [(N,C1,W1,H1), (N,C2,W2,H2), (N,C3,W3,H3), [(M,C1,W1,H1), (M,C2,W2,H2), (M,C3,W3,H3)]], where the 
