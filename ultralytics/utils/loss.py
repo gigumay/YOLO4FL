@@ -11,7 +11,7 @@ from typing import Union
 from collections import OrderedDict
 
 from ultralytics.utils.metrics import OKS_SIGMA
-from ultralytics.utils.ops import crop_mask, xywh2xyxy, xyxy2xywh, generate_protos_train, assign_local2global_proto
+from ultralytics.utils.ops import crop_mask, xywh2xyxy, xyxy2xywh, generate_protos, assign_local2global_proto
 from ultralytics.utils.tal import RotatedTaskAlignedAssigner, TaskAlignedAssigner, dist2bbox, dist2rbox, make_anchors
 from ultralytics.utils.torch_utils import autocast
 
@@ -378,7 +378,7 @@ class v8DetectionLoss:
             )
 
         # generate batch prototypes
-        local_obj_protos = generate_protos_train(embds=embds,hyp=self.hyp,
+        local_obj_protos = generate_protos(embds=embds,hyp=self.hyp,
                                            aggregate=self.hyp.agg_features and self.hyp.n_obj_protos == 1,
                                            is_training=True, gt_bboxes=gt_bboxes, msa=self.msa)
         
@@ -398,7 +398,7 @@ class v8DetectionLoss:
         
 
         if self.hyp.use_background:
-            local_bg_protos = generate_protos_train(embds=embds, hyp=self.hyp, 
+            local_bg_protos = generate_protos(embds=embds, hyp=self.hyp, 
                                               aggregate=self.hyp.agg_features and self.hyp.n_bg_protos == 1,
                                               is_training=True, gt_bboxes=gt_bboxes,msa=self.msa, use_background=True, 
                                               all_preds=(pred_bboxes.detach() * stride_tensor).type(gt_bboxes.dtype),

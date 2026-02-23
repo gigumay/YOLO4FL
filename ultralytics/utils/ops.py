@@ -14,9 +14,8 @@ import random
 import torch.nn.functional as F
 from types import SimpleNamespace
 from typing import OrderedDict
-from finch import FINCH
+from sklearn.cluster import KMeans
 from scipy.optimize import linear_sum_assignment
-from sklearn.metrics import silhouette_score
 
 from ultralytics.utils import LOGGER
 from ultralytics.utils.metrics import batch_probiou, box_iou
@@ -158,107 +157,52 @@ def get_features(embds: list, hyp: SimpleNamespace, gt_bboxes: torch.Tensor=None
     return flatten_features(features_3D), background_deficit
 
 
-def score_clusters(data: np.ndarray, c: np.ndarray) -> tuple[int, float]:
-    """
-    Select the FINCH level with the highest (silhouette) score.
-    Args:
-        X (np.ndarray):         shape (n_samples, n_features) Feature matrix.
-        c (np.ndarray):         shape (n_samples, n_levels) FINCH cluster assignment matrix.
-    Returns:
-        best_lvl (int):         Index of the selected FINCH level.
-        best_score (float):     Corresponding silhouette score.
-    """
-    best_score = -1.0
-    best_lvl = None
-
-    n_levels = c.shape[1]
-
-    for lvl in range(n_levels):
-        labels = c[:, lvl]
-        n_clusters = len(np.unique(labels))
-
-        # silhouette needs at least 2 clusters
-        if n_clusters < 2:
-            continue
-
-        score = silhouette_score(data, labels)
-
-        if score > best_score:
-            best_score = score
-            best_lvl = lvl
-
-    if best_lvl is None:
-        raise ValueError("No valid FINCH level found (need at least 2 clusters).")
-
-    return best_lvl, best_score
-
-
-def cluster_features(feats: np.ndarray) -> tuple[np.ndarray, float]:
-    """
-    Args:
-        feats (np.ndarray) :    features to cluster
-    Returns:
-        centers (np.ndarray):   Cluster centers at selected FINCH level.
-        score (float):          Silhouette score of selected level.
-    """
-
-    # Run FINCH
-    c, _, _ = FINCH(feats)
-    # Pick best level
-    best_lvl, score = score_clusters(feats, c)
-    # Extract labels
-    labels = c[:, best_lvl]
-    # Compute centers
-    centers = []
-    unq_lbls = np.unique(labels)
-
-    for lbl in unq_lbls:
-        centers.append(feats[labels == lbl].mean(axis=0))
-    
-    return np.vstack(centers), score
-
-
-def agg_features(features: torch.Tensor, cluster: bool, is_training: bool=True) -> tuple[torch.tensor, float]:
+def agg_features(features: torch.Tensor, n_protos: int, is_training: bool=True, clustering_algrthm: KMeans=None):
     """
     Aggregate features into prototypes via mean or clustering.
     Args:
         features (torch.Tensor):                Input features with shape (N, C).
-        cluster (bool):                         if True, features will be clustered instead of averaged. 
+        n_protos (int):                         Number of prototypes (clusters) to extract. 
         is_training (bool):                     Whether the model is in training mode. Clustering is not supported during training.
+        clustering_algrthm (KMeans, optional):  Clustering algorithm instance from sklearn. Required if 'n_protos' > 1.
     Returns:
-        Aggregated prototypes with shape (1-n, C), and clustering score if applicable.
+        Aggregated prototypes with shape (n_protos, C).
     """
-    if not cluster:
+    if n_protos == 1:
         proto = features.mean(dim=0, keepdim=True)
-        score = math.nan
     else:
         assert not is_training, "Clustering during training currently not supported"
         features_np = features.detach().cpu().numpy()
-        clusters, score = cluster_features(feats=features_np)
-        proto = torch.from_numpy(clusters).to(device=features.device, dtype=features.dtype)
+        clusters = clustering_algrthm.fit(features_np)
+        proto = torch.from_numpy(clusters.cluster_centers_).to(device=features.device, dtype=features.dtype)
 
-    assert len(proto.shape) == 2, f"Unexpected output shape: {proto.shape}"   
-    assert proto.shape[1] == features.shape[1] 
-    return proto, score
+    assert len(proto.shape) == 2, f"Unexpected output shape: {proto.shape}"    
+    return proto
 
 
-def generate_protos_train(embds: list, hyp: SimpleNamespace, gt_bboxes: torch.Tensor=None, msa: torchvision.ops.MultiScaleRoIAlign=None,
-                          use_background: bool=False,   all_preds: torch.Tensor=None, all_scores: torch.Tensor=None) -> dict:
+def generate_protos(embds: list, hyp: SimpleNamespace, aggregate: bool, is_training: bool, gt_bboxes: torch.Tensor=None, msa: torchvision.ops.MultiScaleRoIAlign=None,
+                    obj_clustering_algrthm: KMeans=None, use_background: bool=False, bg_clustering_algrthm: KMeans=None,  all_preds: torch.Tensor=None, 
+                    all_scores: torch.Tensor=None) -> dict:
     """
-    Generate prototypes from neck and head output feature maps (P3-P5) during training.
+    Generate prototypes from neck and head output feature maps (P3-P5).
     Args:
         embds (list):                                       List of feature maps from the neck and head. This method expects the following structure:
                                                             [(N,C1,W1,H1), (N,C2,W2,H2), (N,C3,W3,H3), [(M,C1,W1,H1), (M,C2,W2,H2), (M,C3,W3,H3)]], where the 
                                                             last element (the list) contains the feature maps from the head.
         hyp (SimpleNamespace):                              Hyperparameters including 'isolate_objects' (bool) and 'n_protos' (int).
+        aggregate (bool):                                   Whether to aggregate features into prototypes.
+        is_training (bool):                                 Whether the model is in training mode. Clustering is not supported during training.
         gt_bboxes (torch.Tensor, optional):                 Ground truth bounding boxes with shape (N, num_boxes, 4) in xyxy format. Required
                                                             if 'isolate_objects' is True.
         msa (torchvision.ops.MultiScaleRoIAlign, optional): MultiScaleRoIAlign module for extracting features. Required if 'isolate_objects' is True.
+        obj_clustering_algrthm (KMeans, optional):          Clustering algorithm instance from sklearn for clustering object features. Required if 'n_protos' > 1. 
         use_background (bool):                              Whether to extract background features.
+        bg_clustering_algrthm (KMeans, optional):           Clustering algorithm instance from sklearn for clustering background features. Required if 'n_protos' > 1.
         all_preds (torch.Tensor, optional):                 Predicted bounding boxes with shape (bs, num_boxes, 4) in xyxy format. Required if 'use_background' is True.
         all_scores (torch.Tensor, optional):                Confidence scores with shape (bs, num_boxes, 1). Required if 'use_background' is True.
+        imgsz (int):                                        Image size.
     Returns:
-        A dictionary containing the generated prototypes for the neck and head, with shape (total_boxes, C).
+        A dictionary containing the generated prototypes for the neck and head, with shape (n_protos, C) if 'aggregate' is True, otherwise (total_boxes, C).
     """
     assert not (use_background and (all_preds is None or all_scores is None)), "'all_preds' and 'all_scores' must be provided when 'use_background' is True"
     assert len(embds) == 4, f"Expected 4 elements in 'embds', got {len(embds)}"
@@ -269,8 +213,14 @@ def generate_protos_train(embds: list, hyp: SimpleNamespace, gt_bboxes: torch.Te
     features_backbone, _ = get_features(embds=embds_backbone, hyp=hyp, gt_bboxes=gt_bboxes, msa=msa, use_background=use_background, all_preds=all_preds, all_scores=all_scores)  # (total_boxes, C) or (N, C)
     features_head, _ = get_features(embds=embds_head, hyp=hyp, gt_bboxes=gt_bboxes, msa=msa, use_background=use_background, all_preds=all_preds, all_scores=all_scores)  # (total_boxes, C) or (N, C)
 
-
-    return {"backbone": features_backbone, "head": features_head}
+    if not aggregate:
+        return {"backbone": features_backbone, "head": features_head}
+    else:
+        n_protos = hyp.n_obj_protos if not use_background else hyp.n_bg_protos
+        clustering_algrthm = obj_clustering_algrthm if not use_background else bg_clustering_algrthm
+        agg_backbone = agg_features(features=features_backbone, n_protos=n_protos, is_training=is_training, clustering_algrthm=clustering_algrthm)
+        agg_head = agg_features(features=features_head, n_protos=n_protos, is_training=is_training, clustering_algrthm=clustering_algrthm)
+        return {"backbone": agg_backbone, "head": agg_head}
     
 
 def assign_local2global_proto(local_proto: torch.Tensor, global_proto: torch.Tensor, return_distances: bool):
