@@ -465,7 +465,7 @@ class BaseTrainer:
             self.lr = {f"lr/pg{ir}": x["lr"] for ir, x in enumerate(self.optimizer.param_groups)}  # for loggers
             self.run_callbacks("on_train_epoch_end")
             if RANK in {-1, 0}:
-                final_epoch = epoch + 1 >= self.epochs
+                final_epoch = (epoch + 1 >= self.epochs) or (self.args.agg_period > 0 and (epoch + 1) % self.args.agg_period == 0)
                 self.ema.update_attr(self.model, include=["yaml", "nc", "args", "names", "stride", "class_weights"])
 
                 # Validation
