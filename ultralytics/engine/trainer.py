@@ -774,6 +774,7 @@ class BaseTrainer:
                 self.args = get_cfg(ckpt_args)
                 self.args.model = self.args.resume = str(last)  # reinstate model
                 for k in (
+                    "agg_period",
                     "imgsz",
                     "batch",
                     "device",
