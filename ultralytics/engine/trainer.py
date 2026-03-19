@@ -465,7 +465,7 @@ class BaseTrainer:
             self.lr = {f"lr/pg{ir}": x["lr"] for ir, x in enumerate(self.optimizer.param_groups)}  # for loggers
             self.run_callbacks("on_train_epoch_end")
             if RANK in {-1, 0}:
-                final_epoch = (epoch + 1 >= self.epochs) or (self.args.agg_period > 0 and (epoch + 1) % self.args.agg_period == 0)
+                final_epoch = (epoch + 1 >= self.epochs) or (self.args.agg_period > 0 and ((epoch + 1) - self.start_epoch) >= self.args.agg_period)
                 self.ema.update_attr(self.model, include=["yaml", "nc", "args", "names", "stride", "class_weights"])
 
                 # Validation
@@ -508,7 +508,7 @@ class BaseTrainer:
             # Do final val with best.pt
             seconds = time.time() - self.train_time_start
             LOGGER.info(f"\n{epoch - self.start_epoch + 1} epochs completed in {seconds / 3600:.3f} hours.")
-            self.final_eval()
+            self.final_eval(strip_last=False)
             if self.args.plots:
                 self.plot_metrics()
             self.run_callbacks("on_train_end")
@@ -741,12 +741,12 @@ class BaseTrainer:
         path = Path(name)
         self.plots[path] = {"data": data, "timestamp": time.time()}
 
-    def final_eval(self):
+    def final_eval(self, strip_last=True):
         """Perform final evaluation and validation for object detection YOLO model."""
         ckpt = {}
         for f in self.last, self.best:
             if f.exists():
-                if f is self.last:
+                if f is self.last and strip_last:
                     ckpt = strip_optimizer(f)
                 elif f is self.best:
                     k = "train_results"  # update best.pt train_metrics from last.pt
@@ -775,6 +775,9 @@ class BaseTrainer:
                 self.args.model = self.args.resume = str(last)  # reinstate model
                 for k in (
                     "agg_period",
+                    "ptl",
+                    "bgl",
+                    "align_prototypes",
                     "imgsz",
                     "batch",
                     "device",
