@@ -414,7 +414,10 @@ class v8DetectionLoss:
                 
                 assert len(bg_distances_backbone.shape) == 1 and bg_distances_backbone.shape[0] == local_bg_protos["backbone"].shape[0]
                 assert len(bg_distances_head.shape) == 1 and bg_distances_head.shape[0] == local_bg_protos["head"].shape[0]
-                loss[4] = bg_distances_backbone.mean() + bg_distances_head.mean()
+                if self.hyp.align_head:
+                    loss[4] = bg_distances_backbone.mean() + bg_distances_head.mean()
+                else:
+                    loss[4] = bg_distances_backbone.mean()
             else:
                 raise NotImplementedError("Currently only L2 distance is supported.")
             
