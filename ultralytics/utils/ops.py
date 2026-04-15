@@ -223,7 +223,7 @@ def generate_protos(embds: list, hyp: SimpleNamespace, aggregate: bool, is_train
         return {"backbone": agg_backbone, "head": agg_head}
     
 
-def assign_local2global_proto(local_proto: torch.Tensor, global_proto: torch.Tensor, return_distances: bool):
+def assign_local2global_proto(local_proto: torch.Tensor, global_proto: torch.Tensor, return_distances: bool, metric: str = "l2"):
     """
     Assign local prototypes to nearest global prototype and return either the corresponding distances or 
     the assigned local prototypes  for each global prototype.
@@ -231,6 +231,7 @@ def assign_local2global_proto(local_proto: torch.Tensor, global_proto: torch.Ten
         local_proto (torch.Tensor):   Local prototypes with shape (n_local, C).
         global_proto (torch.Tensor):  Global prototypes with shape (n_global, C).
         return_distances (bool):      Whether to return distances to assigned global prototypes or group local prototypes.
+        metric (str):                 Distance metric to use ("l2" or "cosine").  # <<< ADDED
     Returns:
         If 'return_distances' is True, returns:
         - assignments (torch.Tensor): Indices of assigned global prototypes for each local prototype with shape (n_local,). 
@@ -241,7 +242,17 @@ def assign_local2global_proto(local_proto: torch.Tensor, global_proto: torch.Ten
     """
 
     # Pairwise distances: [n_local, n_global]
-    dist_matrix = torch.cdist(local_proto, global_proto, p=2)
+    if metric == "cosine": 
+        # Normalize vectors
+        local_norm = torch.nn.functional.normalize(local_proto, p=2, dim=1) 
+        global_norm = torch.nn.functional.normalize(global_proto, p=2, dim=1)  
+
+        # Cosine similarity -> convert to distance
+        sim_matrix = torch.mm(local_norm, global_norm.t())  
+        dist_matrix = 1 - sim_matrix  
+    else:
+        # Default: L2 distance (original behavior preserved)
+        dist_matrix = torch.cdist(local_proto, global_proto, p=2)
 
     # Nearest global centroid for each local
     assignments = dist_matrix.argmin(dim=1)

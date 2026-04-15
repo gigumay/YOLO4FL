@@ -1079,7 +1079,10 @@ class DetMetrics(SimpleClass, DataExportMixin):
         Returns:
             (Dict[str, np.ndarray]): Dictionary containing concatenated statistics arrays.
         """
-        stats = {k: np.concatenate(v, 0) for k, v in self.stats.items()}  # to numpy
+        try:
+            stats = {k: np.concatenate(v, 0) for k, v in self.stats.items()}  # to numpy
+        except:
+            print("DEBUG")
         if len(stats) == 0:
             return stats
         results = ap_per_class(

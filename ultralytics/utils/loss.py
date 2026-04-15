@@ -379,23 +379,26 @@ class v8DetectionLoss:
             )
 
         # generate batch prototypes
-        local_obj_protos = generate_protos(embds=embds,hyp=self.hyp,
+        local_obj_protos = generate_protos(embds=embds, hyp=self.hyp,
                                            aggregate=self.hyp.agg_features and self.hyp.n_obj_protos == 1,
                                            is_training=True, gt_bboxes=gt_bboxes, msa=self.msa)
         
-        if self.hyp.distance_metric == "l2":
-            _, obj_distances_backbone = assign_local2global_proto(local_proto=local_obj_protos["backbone"], 
-                                                                  global_proto=self.global_obj_protos["backbone"], 
-                                                                  return_distances=True)
-            _, obj_distances_head = assign_local2global_proto(local_proto=local_obj_protos["head"], 
-                                                              global_proto=self.global_obj_protos["head"], 
-                                                              return_distances=True)
-            
-            assert len(obj_distances_backbone.shape) == 1 and obj_distances_backbone.shape[0] == local_obj_protos["backbone"].shape[0]
-            assert len(obj_distances_head.shape) == 1 and obj_distances_head.shape[0] == local_obj_protos["head"].shape[0]
-            loss[3] = obj_distances_backbone.mean() + obj_distances_head.mean() 
+        
+        _, obj_distances_backbone = assign_local2global_proto(local_proto=local_obj_protos["backbone"], 
+                                                              global_proto=self.global_obj_protos["backbone"], 
+                                                              return_distances=True,
+                                                              metric=self.hyp.distance_metric)
+        _, obj_distances_head = assign_local2global_proto(local_proto=local_obj_protos["head"], 
+                                                          global_proto=self.global_obj_protos["head"], 
+                                                          return_distances=True,
+                                                          metric=self.hyp.distance_metric)
+        
+        assert len(obj_distances_backbone.shape) == 1 and obj_distances_backbone.shape[0] == local_obj_protos["backbone"].shape[0]
+        assert len(obj_distances_head.shape) == 1 and obj_distances_head.shape[0] == local_obj_protos["head"].shape[0]
+        if self.hyp.align_head:
+            loss[3] = obj_distances_backbone.mean() + obj_distances_head.mean()
         else:
-            raise NotImplementedError("Currently only L2 distance is supported.")
+            loss[3] = obj_distances_backbone.mean()
         
 
         if self.hyp.use_background:
@@ -404,22 +407,21 @@ class v8DetectionLoss:
                                               is_training=True, gt_bboxes=gt_bboxes,msa=self.msa, use_background=True, 
                                               all_preds=(pred_bboxes.detach() * stride_tensor).type(gt_bboxes.dtype),
                                               all_scores=pred_scores.detach().sigmoid())
-            if self.hyp.distance_metric == "l2":
-                _, bg_distances_backbone = assign_local2global_proto(local_proto=local_bg_protos["backbone"],
-                                                                     global_proto=self.global_bg_protos["backbone"],
-                                                                     return_distances=True)
-                _, bg_distances_head = assign_local2global_proto(local_proto=local_bg_protos["head"],
-                                                                 global_proto=self.global_bg_protos["head"],
-                                                                 return_distances=True)
-                
-                assert len(bg_distances_backbone.shape) == 1 and bg_distances_backbone.shape[0] == local_bg_protos["backbone"].shape[0]
-                assert len(bg_distances_head.shape) == 1 and bg_distances_head.shape[0] == local_bg_protos["head"].shape[0]
-                if self.hyp.align_head:
-                    loss[4] = bg_distances_backbone.mean() + bg_distances_head.mean()
-                else:
-                    loss[4] = bg_distances_backbone.mean()
+            _, bg_distances_backbone = assign_local2global_proto(local_proto=local_bg_protos["backbone"],
+                                                                    global_proto=self.global_bg_protos["backbone"],
+                                                                    return_distances=True,
+                                                                    metric=self.hyp.distance_metric)
+            _, bg_distances_head = assign_local2global_proto(local_proto=local_bg_protos["head"],
+                                                                global_proto=self.global_bg_protos["head"],
+                                                                return_distances=True,
+                                                                metric=self.hyp.distance_metric)
+            
+            assert len(bg_distances_backbone.shape) == 1 and bg_distances_backbone.shape[0] == local_bg_protos["backbone"].shape[0]
+            assert len(bg_distances_head.shape) == 1 and bg_distances_head.shape[0] == local_bg_protos["head"].shape[0]
+            if self.hyp.align_head:
+                loss[4] = bg_distances_backbone.mean() + bg_distances_head.mean()
             else:
-                raise NotImplementedError("Currently only L2 distance is supported.")
+                loss[4] = bg_distances_backbone.mean()
             
             #loss[5] = self.pt_contr_loss(local_obj_proto=local_obj_proto, global_obj_proto=self.global_obj_proto, global_bg_proto=self.global_bg_proto)
 
