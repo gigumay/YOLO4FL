@@ -152,6 +152,7 @@ hn_ratio_bg: 1.0 # (float) ratio of hard negative (vs. random) background featur
 bg_sample_frac: None # (float) fraction of available background empty boxes to sample during prototype generation. If None, sample equal to number of gt boxes. 
                      # Even if specified, though, at least num_gt boxes will be sampled.
 align_head: True # (bool) whether to apply prototype alignment to the head in addition to the backbone.
+align_cls_features: True # (bool) whether to apply prototype alignment to the classification features. Only applies if align_head is True.
 
 
 # MultiScaleRoIAligner settings ----------------------------------------------------------------------------------------

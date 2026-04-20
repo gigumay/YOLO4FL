@@ -182,7 +182,7 @@ def agg_features(features: torch.Tensor, n_protos: int, is_training: bool=True, 
 
 def generate_protos(embds: list, hyp: SimpleNamespace, aggregate: bool, is_training: bool, gt_bboxes: torch.Tensor=None, msa: torchvision.ops.MultiScaleRoIAlign=None,
                     obj_clustering_algrthm: KMeans=None, use_background: bool=False, bg_clustering_algrthm: KMeans=None,  all_preds: torch.Tensor=None, 
-                    all_scores: torch.Tensor=None) -> dict:
+                    all_scores: torch.Tensor=None, reg_max: int=16) -> dict:
     """
     Generate prototypes from neck and head output feature maps (P3-P5).
     Args:
@@ -208,7 +208,8 @@ def generate_protos(embds: list, hyp: SimpleNamespace, aggregate: bool, is_train
     assert len(embds) == 4, f"Expected 4 elements in 'embds', got {len(embds)}"
     
     embds_backbone = embds[:3]
-    embds_head = embds[3]
+    embds_head = embds[3] if hyp.align_cls_features else [fm[:, :(reg_max * 4), :, :] for fm in embds[3]]
+
 
     features_backbone, _ = get_features(embds=embds_backbone, hyp=hyp, gt_bboxes=gt_bboxes, msa=msa, use_background=use_background, all_preds=all_preds, all_scores=all_scores)  # (total_boxes, C) or (N, C)
     features_head, _ = get_features(embds=embds_head, hyp=hyp, gt_bboxes=gt_bboxes, msa=msa, use_background=use_background, all_preds=all_preds, all_scores=all_scores)  # (total_boxes, C) or (N, C)
