@@ -382,7 +382,7 @@ class BaseModel(torch.nn.Module):
             self.criterion = self.init_criterion()
 
         preds = self.forward(batch["img"]) if preds is None else preds
-        embds = self.forward(batch["img"], embed=[16,19,22, 23])
+        embds = self.forward(batch["img"], embed=[16,19,22,23])
         return self.criterion(preds, embds, batch)
 
     def init_criterion(self):

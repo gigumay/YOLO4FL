@@ -12,7 +12,7 @@ from collections import OrderedDict
 
 from ultralytics.utils.metrics import OKS_SIGMA
 from ultralytics.utils.ops import crop_mask, xywh2xyxy, xyxy2xywh, generate_protos, assign_local2global_proto
-from ultralytics.utils.tal import RotatedTaskAlignedAssigner, TaskAlignedAssigner, dist2bbox, dist2rbox, make_anchors
+from ultralytics.utils.tal import RotatedTaskAlignedAssigner, TaskAlignedAssigner, TALFeatureExtractor, dist2bbox, dist2rbox, make_anchors
 from ultralytics.utils.torch_utils import autocast
 
 from .metrics import bbox_iou, probiou
@@ -144,65 +144,6 @@ class BboxLoss(nn.Module):
 
         return loss_iou, loss_dfl
     
-
-class PrototypeContrastiveLoss(nn.Module):
-    """
-    Prototype-based contrastive loss.
-    Pulls object features toward object prototypes,
-    and pushes them away from background prototypes.
-    """
-
-    def __init__(self, temperature: float = 0.1):
-        """
-        Args:
-            temperature: Softmax temperature for scaling similarities.
-        """
-        super().__init__()
-        self.temperature = temperature
-
-    def forward(self, local_obj_proto: torch.Tensor, global_obj_proto: torch.Tensor, global_bg_proto: torch.Tensor) -> torch.Tensor:
-        """
-        Arguments:
-            local_obj_proto:        Local object prototype (can also be just un-aggregated features) extracted from the current batch. Shape (N, C)
-            global_obj_proto:       Global object prototypes. Shape (M, C)
-            global_bg_protos:       Global background prototypes. Shape (K, C)
-
-        Returns:
-            Scalar loss value (torch.Tensor)
-        """
-        
-        """
-        # Use L2 distance
-        dist_obj = torch.cdist(local_obj_proto, global_obj_proto, p=2).pow(2)
-        dist_bg = torch.cdist(local_obj_proto, global_bg_proto, p=2).pow(2)
-
-        # Turn distances into logits 
-        logits = torch.cat([-dist_obj / self.temperature, -dist_bg / self.temperature], dim=1)
-
-        # Labels: positives are always in the first block (object prototypes)
-        labels = torch.zeros(logits.size(0), dtype=torch.long, device=logits.device)
-
-        """
-        raise NotImplementedError("Contrastive ")
-        """
-        local = F.normalize(local_obj_proto, dim=1) 
-        obj = F.normalize(global_obj_proto, dim=1) 
-        bg = F.normalize(global_bg_proto, dim=1) 
-        
-        # Cosine similarity (equivalent to dot product of normalized vectors)
-        sim_obj = local @ obj.t() # (N, M) 
-        sim_bg = local @ bg.t() # (N, K) 
-        
-        # Concatenate logits 
-        logits = torch.cat( [sim_obj / self.temperature, sim_bg / self.temperature], dim=1 )
-        
-        # Labels: positives are in the first block 
-        labels = torch.zeros(logits.size(0), dtype=torch.long, device=logits.device)
-
-        # Cross-entropy InfoNCE loss
-        loss = F.cross_entropy(logits, labels)
-        return loss
-        """
         
 
 class RotatedBboxLoss(BboxLoss):
@@ -269,23 +210,12 @@ class v8DetectionLoss:
         self.bce = nn.BCEWithLogitsLoss(reduction="none")
         self.hyp = h
         assert self.hyp.distance_metric in ["l2", "cosine"], "Invalid distance metric!"
-        self.msa = None if not self.hyp.isolate_objects else torchvision.ops.MultiScaleRoIAlign(featmap_names=msa_featmap_names, 
-                                                                                                output_size=self.hyp.msa_out_size,
-                                                                                                sampling_ratio=self.hyp.msa_sampling_ratio,
-                                                                                                canonical_scale=self.hyp.msa_canonical_scale, 
-                                                                                                canonical_level=self.hyp.msa_canonical_level)
+
         # load global prototypes
         self.global_obj_protos = {"backbone": torch.load(self.hyp.global_obj_protos["backbone"]).to(device),
-                                  "head": torch.load(self.hyp.global_obj_protos["head"]).to(device)}
+                                  "head": torch.load(self.hyp.global_obj_protos["head"]).to(device) if self.hyp.align_head else None}
         for v in self.global_obj_protos.values():
             assert len(v.shape) == 2 and v.shape[0] == self.hyp.n_obj_protos
-
-        if self.hyp.use_background:
-            # load global prototypes
-            self.global_bg_protos = {"backbone": torch.load(self.hyp.global_bg_protos["backbone"]).to(device),
-                                    "head": torch.load(self.hyp.global_bg_protos["head"]).to(device)}
-            for v in self.global_bg_protos.values():
-                assert len(v.shape) == 2 and v.shape[0] == self.hyp.n_bg_protos
 
         self.stride = m.stride  # model strides
         self.nc = m.nc  # number of classes
@@ -296,8 +226,8 @@ class v8DetectionLoss:
         self.use_dfl = m.reg_max > 1
 
         self.assigner = TaskAlignedAssigner(topk=tal_topk, num_classes=self.nc, alpha=0.5, beta=6.0)
+        self.extractor = TALFeatureExtractor()
         self.bbox_loss = BboxLoss(m.reg_max).to(device)
-        #self.pt_contr_loss = PrototypeContrastiveLoss(temperature=self.hyp.pt_temp).to(device)
         self.proj = torch.arange(m.reg_max, dtype=torch.float, device=device)
 
     def preprocess(self, targets: torch.Tensor, batch_size: int, scale_tensor: torch.Tensor) -> torch.Tensor:
@@ -329,7 +259,7 @@ class v8DetectionLoss:
 
     def __call__(self, preds: Any, embds: list, batch: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
         """Calculate the sum of the loss for box, cls and dfl multiplied by batch size."""
-        loss = torch.zeros(5, device=self.device)  # box, cls, dfl, ptl, bgl, (contrastive loss) 
+        loss = torch.zeros(4, device=self.device)  if not hyp.align_head else torch.zeros(5, device=self.device) # box, cls, dfl, ptl_bb, ptl_head  
         feats = preds[1] if isinstance(preds, tuple) else preds
         pred_distri, pred_scores = torch.cat([xi.view(feats[0].shape[0], self.no, -1) for xi in feats], 2).split(
             (self.reg_max * 4, self.nc), 1
@@ -355,7 +285,7 @@ class v8DetectionLoss:
         # dfl_conf = (dfl_conf.amax(-1).mean(-1) + dfl_conf.amax(-1).amin(-1)) / 2
 
 
-        _, target_bboxes, target_scores, fg_mask, _ = self.assigner(
+        _, target_bboxes, target_scores, fg_mask, target_gt_idx = self.assigner(
             # pred_scores.detach().sigmoid() * 0.8 + dfl_conf.unsqueeze(-1) * 0.2,
             pred_scores.detach().sigmoid(),
             (pred_bboxes.detach() * stride_tensor).type(gt_bboxes.dtype),
@@ -379,61 +309,33 @@ class v8DetectionLoss:
             )
 
         # generate batch prototypes
-        local_obj_protos = generate_protos(embds=embds, hyp=self.hyp,
-                                           aggregate=self.hyp.agg_features and self.hyp.n_obj_protos == 1,
-                                           is_training=True, gt_bboxes=gt_bboxes, msa=self.msa)
+        local_bb_features = self.extractor(embds=embds[:-1], fg_mask=fg_mask, target_gt_idx=target_gt_idx)  
+        _, obj_distances_bb = assign_local2global_proto(local_proto=local_bb_features, 
+                                                        global_proto=self.global_obj_protos["backbone"], 
+                                                        return_distances=True,
+                                                        metric=self.hyp.distance_metric)
         
+        assert len(obj_distances_bb.shape) == 1 and obj_distances_bb.shape[0] == local_bb_features.shape[0]
+        loss[3] = obj_distances_bb.mean()
         
-        _, obj_distances_backbone = assign_local2global_proto(local_proto=local_obj_protos["backbone"], 
-                                                              global_proto=self.global_obj_protos["backbone"], 
+        if self.hyp.align_head:
+            local_head_features = self.extractor(embds=embds[-1], fg_mask=fg_mask, target_gt_idx=target_gt_idx)
+            _, obj_distances_head = assign_local2global_proto(local_proto=local_head_features, 
+                                                              global_proto=self.global_obj_protos["head"], 
                                                               return_distances=True,
                                                               metric=self.hyp.distance_metric)
-        _, obj_distances_head = assign_local2global_proto(local_proto=local_obj_protos["head"], 
-                                                          global_proto=self.global_obj_protos["head"], 
-                                                          return_distances=True,
-                                                          metric=self.hyp.distance_metric)
-        
-        assert len(obj_distances_backbone.shape) == 1 and obj_distances_backbone.shape[0] == local_obj_protos["backbone"].shape[0]
-        assert len(obj_distances_head.shape) == 1 and obj_distances_head.shape[0] == local_obj_protos["head"].shape[0]
-        if self.hyp.align_head:
-            loss[3] = obj_distances_backbone.mean() + obj_distances_head.mean()
-        else:
-            loss[3] = obj_distances_backbone.mean()
-        
-
-        if self.hyp.use_background:
-            local_bg_protos = generate_protos(embds=embds, hyp=self.hyp, 
-                                              aggregate=self.hyp.agg_features and self.hyp.n_bg_protos == 1,
-                                              is_training=True, gt_bboxes=gt_bboxes,msa=self.msa, use_background=True, 
-                                              all_preds=(pred_bboxes.detach() * stride_tensor).type(gt_bboxes.dtype),
-                                              all_scores=pred_scores.detach().sigmoid())
-            _, bg_distances_backbone = assign_local2global_proto(local_proto=local_bg_protos["backbone"],
-                                                                    global_proto=self.global_bg_protos["backbone"],
-                                                                    return_distances=True,
-                                                                    metric=self.hyp.distance_metric)
-            _, bg_distances_head = assign_local2global_proto(local_proto=local_bg_protos["head"],
-                                                                global_proto=self.global_bg_protos["head"],
-                                                                return_distances=True,
-                                                                metric=self.hyp.distance_metric)
-            
-            assert len(bg_distances_backbone.shape) == 1 and bg_distances_backbone.shape[0] == local_bg_protos["backbone"].shape[0]
-            assert len(bg_distances_head.shape) == 1 and bg_distances_head.shape[0] == local_bg_protos["head"].shape[0]
-            if self.hyp.align_head:
-                loss[4] = bg_distances_backbone.mean() + bg_distances_head.mean()
-            else:
-                loss[4] = bg_distances_backbone.mean()
-            
-            #loss[5] = self.pt_contr_loss(local_obj_proto=local_obj_proto, global_obj_proto=self.global_obj_proto, global_bg_proto=self.global_bg_proto)
+            assert len(obj_distances_head.shape) == 1 and obj_distances_head.shape[0] == local_head_features.shape[0]
+            loss[4] = obj_distances_head.mean()
 
     
         loss[0] *= self.hyp.box  # box gain
         loss[1] *= self.hyp.cls  # cls gain
         loss[2] *= self.hyp.dfl  # dfl gain
-        loss[3] *= self.hyp.ptl  # ptl gain
-        loss[4] *= self.hyp.bgl  # bgl gain
-        #loss[5] *= self.hyp.pt_contr_loss  # contrastive loss gain
+        loss[3] *= self.hyp.ptl_bb  # ptl gain bb
+        loss[4] *= self.hyp.ptl_head  # ptl gain head
 
-        return loss * batch_size, loss.detach()  # loss(box, cls, dfl, ptl, bgl)
+        return loss * batch_size, loss.detach()  # loss(box, cls, dfl, ptl_bb, ptl_head)
+
 
 
 class v8SegmentationLoss(v8DetectionLoss):

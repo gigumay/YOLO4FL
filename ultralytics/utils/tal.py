@@ -124,8 +124,6 @@ class TaskAlignedAssigner(nn.Module):
         norm_align_metric = (align_metric * pos_overlaps / (pos_align_metrics + self.eps)).amax(-2).unsqueeze(-1)
         target_scores = target_scores * norm_align_metric
 
-        #TODO: Filter out predictions exceeding image limits 
-        #TODO: Make sure pred and gt boxes are in x1y1x2y2
 
         return target_labels, target_bboxes, target_scores, fg_mask.bool(), target_gt_idx
 
@@ -365,6 +363,65 @@ class RotatedTaskAlignedAssigner(TaskAlignedAssigner):
         ap_dot_ab = (ap * ab).sum(dim=-1)
         ap_dot_ad = (ap * ad).sum(dim=-1)
         return (ap_dot_ab >= 0) & (ap_dot_ab <= norm_ab) & (ap_dot_ad >= 0) & (ap_dot_ad <= norm_ad)  # is_in_box
+    
+
+
+
+class TALFeatureExtractor(nn.Module):
+    """
+    Extract object-level features from feature maps using TAL assignments.
+    
+    Flattens and concatenates feature maps across levels (matching make_anchors order),
+    then pools assigned anchor features per GT object, optionally weighted by align_metric.
+    """
+
+    def __init__(self):
+        super().__init__()
+
+    def forward(
+        self,
+        embds: list,
+        fg_mask: torch.Tensor,
+        target_gt_idx: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Args:
+            embds:          list of feature maps [(B, C, H_i, W_i), ...], same level 
+                            order as strides passed to make_anchors.
+            fg_mask:        (B, A) bool — foreground anchor mask from TAL.
+            target_gt_idx:  (B, A) long — which GT each anchor is assigned to.
+
+        Returns:
+            obj_features:   (N_objects, C) — one pooled feature vector per GT object
+                            across the batch. Returns empty tensor if no foreground anchors.
+        """
+
+        # flatten spatial dims and concat levels: (B, C, A_total)
+        # flatten(2) is row-major (H, W) which matches make_anchors meshgrid(indexing='ij')
+        all_feats = torch.cat([f.flatten(2) for f in embds], dim=2)
+
+        B = fg_mask.shape[0]
+        obj_features = []
+
+        for b in range(B):
+            pos_idx = fg_mask[b].nonzero(as_tuple=True)[0]  # (P,)
+            if pos_idx.numel() == 0:
+                continue
+
+            gt_idx = target_gt_idx[b, pos_idx]    # (P,)
+            feats_pos = all_feats[b, :, pos_idx]  # (C, P)
+
+            for g in gt_idx.unique():
+                sel_mask = gt_idx == g
+                sel_feats = feats_pos[:, sel_mask]  # (C, K)
+
+                obj_features.append(sel_feats.mean(dim=1))
+
+        if not obj_features:
+            raise RuntimeError("No foreground anchors found for any GT objects. Cannot extract object features.")
+
+        return torch.stack(obj_features)  # (N_objects, C)
+
 
 
 def make_anchors(feats, strides, grid_cell_offset=0.5):

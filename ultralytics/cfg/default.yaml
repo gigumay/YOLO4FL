@@ -67,18 +67,9 @@ classes: # (int | list[int], optional) filter results by class, i.e. classes=0, 
 retina_masks: False # (bool) use high-resolution segmentation masks
 embed: # (list[int], optional) return feature vectors/embeddings from given layers
 return_all_preds: False # (bool) if True all predictions as generated before pre-processing will be returned
-scale_by_dist: False # (bool) if True, confidence scores are scaled by distance to global prototypes
-ptt_extraction_point: "backbone" # (str) point of the network from which to use prototypes for distance scaling
-msa_out_size: 7 # (int) object feature map size 
-msa_sampling_ratio: 2 # (int) sampling ratio for RoI alignment
-msa_canonical_level: 3 # (int) FPN level from which objects of size canonical_scale x canonical_scale should be pooled from
-msa_canonical_scale: 50 # (int) canonical scale
-msa_layer_names: ["P3", "P4", "P5"] # (list) names of the layers to use for the msa feature extraction
-dist_scaling_temp: 1.0 # (float) temperature for distance sclaing of predictions
 
 # Inference + Training shared settings ---------------------------------------------------------------------------------------------------
 global_obj_protos:  # (dict) dictionary containing paths to the global object prototype files (.pt) for the backbone and head
-global_bg_protos: None # (dict) dictionary containing paths to the global background prototype files (.pt) for the backbone and head
 
 # Visualize settings ---------------------------------------------------------------------------------------------------
 show: False # (bool) show predicted images and videos if environment allows
@@ -138,37 +129,14 @@ erasing: 0.4 # (float) probability of random erasing during classification train
 
 # Prototype Regularization ---------------------------------------------------------------------------------------------
 align_prototypes: # (bool) whether to enforce alignment with the global prototype during training 
-ptl: 1.0 # (float) Prototype loss gain
-bgl: 1.0 # (float) Background prototype loss gain 
-pt_contr_loss: 1.0 # (float) Prototype contrastive loss gain
-pt_temp: 0.1 # (float) Temperature for prototype contrastive loss
-isolate_objects: True # (bool) whether to align using only object features. If False, the entire layer #22 is used
+ptl_bb: 1.0 # (float) Prototype loss gain for the backbone
+ptl_head: 1.0 # (float) Prototype loss gain for the head
 distance_metric: "l2" # (string) metric used to calculate prototype distance. Alternative is "cosine". 
 n_obj_protos: 5 # (int) number of object prototypes (embeddign clusters) to extract 
-n_bg_protos: 100 # (int) number of background prototypes (embeddign clusters) to extract
 agg_features: False # (bool) if True, features will be averaged before computing the distance to the global protoype when n_protos == 1
-use_background: False # (bool) if True, background features will be used as negative samples during prototype alignment
-hn_ratio_bg: 1.0 # (float) ratio of hard negative (vs. random) background features to sample
-bg_sample_frac: None # (float) fraction of available background empty boxes to sample during prototype generation. If None, sample equal to number of gt boxes. 
-                     # Even if specified, though, at least num_gt boxes will be sampled.
 align_head: True # (bool) whether to apply prototype alignment to the head in addition to the backbone.
-align_cls_features: True # (bool) whether to apply prototype alignment to the classification features. Only applies if align_head is True.
 
 
-# MultiScaleRoIAligner settings ----------------------------------------------------------------------------------------
-msa_out_size: 7 # (int) object feature map size 
-msa_sampling_ratio: 2 # (int) sampling ratio for RoI alignment
-msa_canonical_level: 3 # (int) FPN level from which objects of size canonical_scale x canonical_scale should be pooled from
-msa_canonical_scale: 50 # (int) canonical scale
-msa_box_padding: 0.0 # (float) box padding (fraction of box size) to add to a box before extracting the features
-# Logic behind default values: 
-  # msa_output_size: 7 is used in R-CNN models and seems to be the default.
-  # msa_sampling_ratio: Also a common default. Higher value lead to increased computation and (according to ChatGPT) is only 
-    # beneficial when high-res feature maps are available (not our case given the small objects)
-  # msa_canonical_scale: In the AED, the avg. box size is 50 pixels
-  # msa_canonical_level: P3 is 80x80, so 1/8 of the input size. 50/8 is 6.25, so almost seven. Mapping a 50 px object 
-    # to P3 will therefore require only minimal upsampling through the RoI align mechanism, It therefore makes sense to 
-    # map 50 px objects to P3.
 
 # Custom config.yaml ---------------------------------------------------------------------------------------------------
 cfg: # (str, optional) for overriding defaults.yaml
