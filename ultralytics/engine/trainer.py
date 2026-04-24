@@ -341,6 +341,36 @@ class BaseTrainer:
         self.scheduler.last_epoch = self.start_epoch - 1  # do not move
         self.run_callbacks("on_pretrain_routine_end")
 
+    def _collect_features(self):
+        LOGGER.info("Collecting features over training data...")
+
+        model = self.ema.ema if self.ema else self.model
+        model.eval()
+
+        all_features = []
+
+        with torch.no_grad():
+            pbar = TQDM(self.train_loader, total=len(self.train_loader))
+
+            for i, batch in enumerate(pbar):
+                with autocast(self.amp):
+                    batch = self.preprocess_batch(batch)
+                    _, _, features = model(batch)
+
+                all_features.append({k: v.cpu() for k, v in features.items()})
+                pbar.set_description(f"Collecting features [{i+1}/{len(self.train_loader)}]")
+        
+        model.train()
+
+        # save 
+        all_features_bb = torch.cat([f["bb"] for f in all_features], dim=0)
+        torch.save(all_features_bb, self.args.features_out_dir / "features_bb.pt")
+        if self.args.align_head:
+            all_features_head = torch.cat([f["head"] for f in all_features], dim=0)
+            torch.save(all_features_head, self.args.features_out_dir / "features_head.pt")
+
+        return all_features
+
     def _do_train(self, world_size=1):
         """Train the model with the specified world size."""
         if world_size > 1:
@@ -404,16 +434,15 @@ class BaseTrainer:
                 with autocast(self.amp):
                     batch = self.preprocess_batch(batch)
                     if self.args.task == "detect":
-                        loss, self.loss_items = self.model(batch)
+                        loss, self.loss_items, _ = self.model(batch)
 
                         if not self.args.align_prototypes:
                             # zero out prototype loss
                             loss[3] = 0
-                            loss[4] = 0
-                            #loss[5] = 0
                             self.loss_items[3] = 0
-                            self.loss_items[4] = 0
-                            #self.loss_items[5] = 0
+                            if self.args.align_head:
+                                loss[4] = 0
+                                self.loss_items[4] = 0
                     else:
                         loss, self.loss_items = self.model(batch)
                     
@@ -508,6 +537,10 @@ class BaseTrainer:
             # Do final val with best.pt
             seconds = time.time() - self.train_time_start
             LOGGER.info(f"\n{epoch - self.start_epoch + 1} epochs completed in {seconds / 3600:.3f} hours.")
+            
+            # collect training set features
+            self._collect_features()
+
             self.final_eval(strip_last=False)
             if self.args.plots:
                 self.plot_metrics()

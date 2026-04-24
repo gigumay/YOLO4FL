@@ -332,9 +332,12 @@ class v8DetectionLoss:
         loss[1] *= self.hyp.cls  # cls gain
         loss[2] *= self.hyp.dfl  # dfl gain
         loss[3] *= self.hyp.ptl_bb  # ptl gain bb
-        loss[4] *= self.hyp.ptl_head  # ptl gain head
+        if self.hyp.align_head:
+            loss[4] *= self.hyp.ptl_head  # ptl gain head
 
-        return loss * batch_size, loss.detach()  # loss(box, cls, dfl, ptl_bb, ptl_head)
+        features = {"bb": local_bb_features, "head": local_head_features if self.hyp.align_head else None}
+
+        return loss * batch_size, loss.detach(), features  # loss(box, cls, dfl, ptl_bb, ptl_head)
 
 
 

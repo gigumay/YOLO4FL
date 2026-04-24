@@ -135,6 +135,7 @@ distance_metric: "l2" # (string) metric used to calculate prototype distance. Al
 n_obj_protos: 5 # (int) number of object prototypes (embeddign clusters) to extract 
 agg_features: False # (bool) if True, features will be averaged before computing the distance to the global protoype when n_protos == 1
 align_head: True # (bool) whether to apply prototype alignment to the head in addition to the backbone.
+features_out_dir: #(str) where to save the features extracted during training.
 
 
 
