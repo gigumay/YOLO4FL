@@ -79,150 +79,25 @@ class Profile(contextlib.ContextDecorator):
             torch.cuda.synchronize(self.device)
         return time.perf_counter()
 
-
-
-
-
-def agg_features(features: torch.Tensor, n_protos: int, is_training: bool=True, clustering_algrthm: KMeans=None):
-    """
-    Aggregate features into prototypes via mean or clustering.
-    Args:
-        features (torch.Tensor):                Input features with shape (N, C).
-        n_protos (int):                         Number of prototypes (clusters) to extract. 
-        is_training (bool):                     Whether the model is in training mode. Clustering is not supported during training.
-        clustering_algrthm (KMeans, optional):  Clustering algorithm instance from sklearn. Required if 'n_protos' > 1.
-    Returns:
-        Aggregated prototypes with shape (n_protos, C).
-    """
-    if n_protos == 1:
-        proto = features.mean(dim=0, keepdim=True)
-    else:
-        assert not is_training, "Clustering during training currently not supported"
-        features_np = features.detach().cpu().numpy()
-        clusters = clustering_algrthm.fit(features_np)
-        proto = torch.from_numpy(clusters.cluster_centers_).to(device=features.device, dtype=features.dtype)
-
-    assert len(proto.shape) == 2, f"Unexpected output shape: {proto.shape}"    
-    return proto
-
     
-
-def assign_local2global_proto(local_proto: torch.Tensor, global_proto: torch.Tensor, return_distances: bool, metric: str = "l2"):
-    """
-    Assign local prototypes to nearest global prototype and return either the corresponding distances or 
-    the assigned local prototypes  for each global prototype.
+def compute_dist2global(local_proto: torch.Tensor, global_proto: torch.Tensor, metric: str):
+    """"
+    Compute closest global prototype for each local prototype and return the corresponding distances.
     Args:
         local_proto (torch.Tensor):   Local prototypes with shape (n_local, C).
         global_proto (torch.Tensor):  Global prototypes with shape (n_global, C).
-        return_distances (bool):      Whether to return distances to assigned global prototypes or group local prototypes.
         metric (str):                 Distance metric to use ("l2" or "cosine").  # <<< ADDED
     Returns:
-        If 'return_distances' is True, returns:
-        - assignments (torch.Tensor): Indices of assigned global prototypes for each local prototype with shape (n_local,). 
-        - distances (torch.Tensor):   Distances to assigned global prototypes with shape (n_local,).
-        If 'return_distances' is False, returns:
-        - assignments (torch.Tensor): Indices of assigned global prototypes for each local prototype with shape (n_local,).
-        - grouped (dict):             Dictionary mapping global prototype indices to lists of local prototypes assigned to them.
+        distances (torch.Tensor):   Distances to closest global prototypes with shape (n_local,).
     """
-
-    # Pairwise distances: [n_local, n_global]
-    if metric == "cosine": 
-        # Normalize vectors
-        local_norm = torch.nn.functional.normalize(local_proto, p=2, dim=1) 
-        global_norm = torch.nn.functional.normalize(global_proto, p=2, dim=1)  
-
-        # Cosine similarity -> convert to distance
-        sim_matrix = torch.mm(local_norm, global_norm.t())  
-        dist_matrix = 1 - sim_matrix  
+    if metric == "cosine":
+        local_norm = torch.nn.functional.normalize(local_proto, p=2, dim=1)
+        global_norm = torch.nn.functional.normalize(global_proto, p=2, dim=1)
+        dist_matrix = 1 - torch.mm(local_norm, global_norm.t())
     else:
-        # Default: L2 distance (original behavior preserved)
         dist_matrix = torch.cdist(local_proto, global_proto, p=2)
 
-    # Nearest global centroid for each local
-    assignments = dist_matrix.argmin(dim=1)
-
-    if return_distances:
-        # Just the distances to assigned global prototype
-        distances = dist_matrix[torch.arange(local_proto.shape[0]), assignments]
-        return assignments, distances
-    else:
-        # Group locals into a list of tensors
-        grouped = {idx: [] for idx in range(global_proto.shape[0])}
-        for g in range(global_proto.size(0)):
-            mask = (assignments == g)
-            if mask.any():
-                grouped[g].append(local_proto[mask])
-    
-        return assignments, grouped
-    
-
-def compute_cost_matrix(clusters, candidates):
-    """
-    Compute cost matrix for grouping of prototypes.
-    Args:
-        clusters (torch.Tensor):   Current clusters with shape (n_clusters, n_protos, C).
-        candidates (torch.Tensor):  Candidate prototypes to assign with shape (n_candidates, C).
-    Returns:
-        Cost matrix with shape (n_candidates, n_clusters).
-    """
-    raise NotImplementedError("Ourdated")
-    cm = torch.zeros((candidates.shape[0], clusters.shape[0]), dtype=torch.float32, device=candidates.device)
-
-    for j in range(clusters.shape[0]):                     
-        dists = torch.cdist(candidates, clusters[j], p=2)   
-        cm[:, j] = dists.sum(dim=1)              
-    
-    return cm
-
-
-def prototype_matching(prototypes, n_orders=10):
-    """
-    Cluster prototypes into groups of size n_protos by iteratively optimizing via Jonker-Volgenant algorithm 
-    to approximat the global cost minimum as measured via the L2 distance.
-    Args:
-        prototypes (torch.Tensor): Prototypes to cluster with shape (n_prototypes, C).
-        n_orders (int):            Number of random orders to try for clustering to reduce order bias.
-    Returns:
-        best_clusters (torch.Tensor):   Clustered prototypes with shape (n_clusters, n_protos, C).
-        best_total_cost (float):        Total cost associated with the best clustering.
-    """
-    raise NotImplementedError("Outdated")
-
-    best_total_cost = np.inf
-    best_clusters = None
-    
-    for base_idx in range(prototypes.shape[0]):
-        base_set = prototypes[base_idx]
-        remaining_indices = [i for i in range(prototypes.shape[0]) if i != base_idx]
-        
-        for _ in range(n_orders):
-            # Shuffle the remaining sets to reduce order bias
-            random.shuffle(remaining_indices)
-            
-            clusters = torch.unsqueeze(base_set, dim=1)
-            total_cost = 0.0
-            
-            for idx in remaining_indices:
-                candidate_points = prototypes[idx]
-                cost_matrix = compute_cost_matrix(clusters=clusters, candidates=candidate_points)
-                row_ind, col_ind = linear_sum_assignment(cost_matrix.detach().cpu().numpy())
-
-                # extend clusters along "points per cluster" axis
-                new_points = torch.zeros((clusters.shape[0], 1, clusters.shape[2]), dtype=clusters.dtype, device=clusters.device)
-                clusters = torch.cat([clusters, new_points], dim=1)
-                
-                for r_idx, c_idx in zip(row_ind, col_ind):
-                    # insert new point into cluster
-                    clusters[c_idx, clusters.shape[1] - 1, :] = candidate_points[r_idx] 
-                    total_cost += float(cost_matrix[r_idx, c_idx].item())
-            
-            if total_cost < best_total_cost:
-                best_total_cost = total_cost
-                best_clusters = clusters
-    
-    return best_clusters, best_total_cost
-
-
+    return dist_matrix.min(dim=1).values
 
 
 

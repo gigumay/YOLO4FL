@@ -342,7 +342,7 @@ class BaseTrainer:
         self.run_callbacks("on_pretrain_routine_end")
 
     def _collect_features(self):
-        LOGGER.info("Collecting features over training data...")
+        LOGGER.info("Collecting features from training data...")
 
         model = self.ema.ema if self.ema else self.model
         model.eval()

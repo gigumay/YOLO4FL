@@ -11,7 +11,7 @@ from typing import Union
 from collections import OrderedDict
 
 from ultralytics.utils.metrics import OKS_SIGMA
-from ultralytics.utils.ops import crop_mask, xywh2xyxy, xyxy2xywh, generate_protos, assign_local2global_proto
+from ultralytics.utils.ops import crop_mask, xywh2xyxy, xyxy2xywh, compute_dist2global
 from ultralytics.utils.tal import RotatedTaskAlignedAssigner, TaskAlignedAssigner, TALFeatureExtractor, dist2bbox, dist2rbox, make_anchors
 from ultralytics.utils.torch_utils import autocast
 
@@ -310,20 +310,19 @@ class v8DetectionLoss:
 
         # generate batch prototypes
         local_bb_features = self.extractor(embds=embds[:-1], fg_mask=fg_mask, target_gt_idx=target_gt_idx)  
-        _, obj_distances_bb = assign_local2global_proto(local_proto=local_bb_features, 
-                                                        global_proto=self.global_obj_protos["backbone"], 
-                                                        return_distances=True,
-                                                        metric=self.hyp.distance_metric)
+        obj_distances_bb = compute_dist2global(local_proto=local_bb_features, 
+                                               global_proto=self.global_obj_protos["backbone"], 
+                                               metric=self.hyp.distance_metric)
         
         assert len(obj_distances_bb.shape) == 1 and obj_distances_bb.shape[0] == local_bb_features.shape[0]
         loss[3] = obj_distances_bb.mean()
         
         if self.hyp.align_head:
             local_head_features = self.extractor(embds=embds[-1], fg_mask=fg_mask, target_gt_idx=target_gt_idx)
-            _, obj_distances_head = assign_local2global_proto(local_proto=local_head_features, 
-                                                              global_proto=self.global_obj_protos["head"], 
-                                                              return_distances=True,
-                                                              metric=self.hyp.distance_metric)
+            obj_distances_head = compute_dist2global(local_proto=local_head_features, 
+                                                     global_proto=self.global_obj_protos["head"], 
+                                                     metric=self.hyp.distance_metric)
+            
             assert len(obj_distances_head.shape) == 1 and obj_distances_head.shape[0] == local_head_features.shape[0]
             loss[4] = obj_distances_head.mean()
 
