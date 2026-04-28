@@ -355,19 +355,22 @@ class BaseTrainer:
             for i, batch in enumerate(pbar):
                 with autocast(self.amp):
                     batch = self.preprocess_batch(batch)
-                    _, _, features = model(batch)
+                    _, _, features = model(batch, return_features=True)
 
-                all_features.append({k: v.cpu() for k, v in features.items()})
+                    if features["bb"] is None:
+                        continue  # skip if no features extracted (e.g., no foreground objects)
+
+                all_features.append({k: v.cpu() if v is not None else None for k, v in features.items()})
                 pbar.set_description(f"Collecting features [{i+1}/{len(self.train_loader)}]")
         
         model.train()
 
         # save 
         all_features_bb = torch.cat([f["bb"] for f in all_features], dim=0)
-        torch.save(all_features_bb, self.args.features_out_dir / "features_bb.pt")
+        torch.save(all_features_bb, f"{self.args.features_out_dir}/features_bb.pt")
         if self.args.align_head:
             all_features_head = torch.cat([f["head"] for f in all_features], dim=0)
-            torch.save(all_features_head, self.args.features_out_dir / "features_head.pt")
+            torch.save(all_features_head, f"{self.args.features_out_dir}/features_head.pt")
 
         return all_features
 
@@ -435,14 +438,6 @@ class BaseTrainer:
                     batch = self.preprocess_batch(batch)
                     if self.args.task == "detect":
                         loss, self.loss_items, _ = self.model(batch)
-
-                        if not self.args.align_prototypes:
-                            # zero out prototype loss
-                            loss[3] = 0
-                            self.loss_items[3] = 0
-                            if self.args.align_head:
-                                loss[4] = 0
-                                self.loss_items[4] = 0
                     else:
                         loss, self.loss_items = self.model(batch)
                     

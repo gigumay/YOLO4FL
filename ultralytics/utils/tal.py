@@ -2,6 +2,7 @@
 
 import torch
 import torch.nn as nn
+import warnings
 
 from . import LOGGER
 from .checks import check_version
@@ -400,10 +401,10 @@ class TALFeatureExtractor(nn.Module):
         # flatten(2) is row-major (H, W) which matches make_anchors meshgrid(indexing='ij')
         all_feats = torch.cat([f.flatten(2) for f in embds], dim=2)
 
-        B = fg_mask.shape[0]
+        bs = fg_mask.shape[0]
         obj_features = []
 
-        for b in range(B):
+        for b in range(bs):
             pos_idx = fg_mask[b].nonzero(as_tuple=True)[0]  # (P,)
             if pos_idx.numel() == 0:
                 continue
@@ -418,7 +419,7 @@ class TALFeatureExtractor(nn.Module):
                 obj_features.append(sel_feats.mean(dim=1))
 
         if not obj_features:
-            raise RuntimeError("No foreground anchors found for any GT objects. Cannot extract object features.")
+            return None
 
         return torch.stack(obj_features)  # (N_objects, C)
 

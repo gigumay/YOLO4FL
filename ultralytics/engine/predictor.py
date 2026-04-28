@@ -53,7 +53,7 @@ from ultralytics.utils import DEFAULT_CFG, LOGGER, MACOS, WINDOWS, callbacks, co
 from ultralytics.utils.checks import check_imgsz, check_imshow
 from ultralytics.utils.files import increment_path
 from ultralytics.utils.torch_utils import select_device, smart_inference_mode
-from ultralytics.utils.ops import xywh2xyxy, flatten_features
+from ultralytics.utils.ops import xywh2xyxy
 
 STREAM_WARNING = """
 inference results will accumulate in RAM unless `stream=True` is passed, causing potential out-of-memory
@@ -370,22 +370,8 @@ class BasePredictor:
         if not self.model:
             self.setup_model(model)
 
-        # Setup MSA and global protos if required:
-        if self.args.scale_by_dist:
-            if self.global_obj_protos is None:
-                self.global_obj_protos = torch.load(self.args.global_obj_protos[self.args.ptt_extraction_point])
-            if self.global_bg_protos is None:
-                self.global_bg_protos = torch.load(self.args.global_bg_protos[self.args.ptt_extraction_point])
-            if self.msa is None:
-                self.msa = torchvision.ops.MultiScaleRoIAlign(featmap_names=self.args.msa_layer_names, 
-                                                              output_size=self.args.msa_out_size,
-                                                              sampling_ratio=self.args.msa_sampling_ratio,
-                                                              canonical_scale=self.args.msa_canonical_scale,
-                                                              canonical_level=self.args.msa_canonical_level) 
             self.args.return_all_preds = True
-            self.args.embed = [16, 19, 22] 
-            assert self.args.ptt_extraction_point == "backbone", "Current logic assumes usage of backbone features at inference time!" \
-                                                                 "Double check before chaning this and removing this assertion!"
+            self.args.embed = [16, 19, 22, 23] 
 
         with self._lock:  # for thread-safe inference
             # Setup source every time predict is called
@@ -421,17 +407,12 @@ class BasePredictor:
                 with profilers[1]:
                     preds = self.inference(im, *args, **kwargs)
 
-                    if self.args.embed and not (self.args.return_all_preds or self.args.scale_by_dist):
+                    if self.args.embed and not self.args.return_all_preds:
                         yield from [preds] if isinstance(preds, torch.Tensor) else preds  # yield embedding tensors
                         continue
-                    if self.args.embed and self.args.return_all_preds and not self.args.scale_by_dist:
+                    if self.args.embed and self.args.return_all_preds:
                         yield preds
                         continue
-                    if self.args.scale_by_dist:
-                        assert preds[0].shape[0] == 1, "Found batch size > 1. This was not explicitly accounted for!"
-                        assert preds[0].shape[1] == 5, "Multi-Class case not supported at the moment"
-                        
-                        preds[0] = self.scale_preds_by_dist(preds=preds)
 
                 # Postprocess
                 with profilers[2]:

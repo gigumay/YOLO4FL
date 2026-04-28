@@ -16,9 +16,7 @@ from ultralytics.utils.tal import RotatedTaskAlignedAssigner, TaskAlignedAssigne
 from ultralytics.utils.torch_utils import autocast
 
 from .metrics import bbox_iou, probiou
-from .ops import sample_empty_boxes
 from .tal import bbox2dist
-from sklearn.cluster import KMeans
 
 
 class VarifocalLoss(nn.Module):
@@ -200,7 +198,7 @@ class KeypointLoss(nn.Module):
 
 class v8DetectionLoss:
     """Criterion class for computing training losses for YOLOv8 object detection."""
-    def __init__(self, model, tal_topk: int = 10, msa_featmap_names: list = ["P3", "P4", "P5"]): 
+    def __init__(self, model, tal_topk: int = 10): 
         """Initialize v8DetectionLoss with model parameters and task-aligned assignment settings. Also initializes a
         MultiScaleRoIAlign object for object feature extraction."""
          # model must be de-paralleled
@@ -212,10 +210,12 @@ class v8DetectionLoss:
         assert self.hyp.distance_metric in ["l2", "cosine"], "Invalid distance metric!"
 
         # load global prototypes
-        self.global_obj_protos = {"backbone": torch.load(self.hyp.global_obj_protos["backbone"]).to(device),
-                                  "head": torch.load(self.hyp.global_obj_protos["head"]).to(device) if self.hyp.align_head else None}
-        for v in self.global_obj_protos.values():
-            assert len(v.shape) == 2 and v.shape[0] == self.hyp.n_obj_protos
+        if self.hyp.align_prototypes:
+            self.global_obj_protos = {"bb": torch.load(self.hyp.global_obj_protos["bb"]).to(device),
+                                    "head": torch.load(self.hyp.global_obj_protos["head"]).to(device) if self.hyp.align_head else None}
+            for v in self.global_obj_protos.values():
+                if v is not None:
+                    assert len(v.shape) == 2
 
         self.stride = m.stride  # model strides
         self.nc = m.nc  # number of classes
@@ -257,9 +257,9 @@ class v8DetectionLoss:
         return dist2bbox(pred_dist, anchor_points, xywh=False)
 
 
-    def __call__(self, preds: Any, embds: list, batch: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
+    def __call__(self, preds: Any, embds: list, batch: Dict[str, torch.Tensor], return_features: bool = False) -> Tuple[torch.Tensor, torch.Tensor]:
         """Calculate the sum of the loss for box, cls and dfl multiplied by batch size."""
-        loss = torch.zeros(4, device=self.device)  if not hyp.align_head else torch.zeros(5, device=self.device) # box, cls, dfl, ptl_bb, ptl_head  
+        loss = torch.zeros(4, device=self.device)  if not self.hyp.align_head else torch.zeros(5, device=self.device) # box, cls, dfl, ptl_bb, ptl_head  
         feats = preds[1] if isinstance(preds, tuple) else preds
         pred_distri, pred_scores = torch.cat([xi.view(feats[0].shape[0], self.no, -1) for xi in feats], 2).split(
             (self.reg_max * 4, self.nc), 1
@@ -309,23 +309,34 @@ class v8DetectionLoss:
             )
 
         # generate batch prototypes
-        local_bb_features = self.extractor(embds=embds[:-1], fg_mask=fg_mask, target_gt_idx=target_gt_idx)  
-        obj_distances_bb = compute_dist2global(local_proto=local_bb_features, 
-                                               global_proto=self.global_obj_protos["backbone"], 
-                                               metric=self.hyp.distance_metric)
+        if return_features or self.hyp.align_prototypes:
+            local_bb_features = self.extractor(embds=embds[:-1], fg_mask=fg_mask, target_gt_idx=target_gt_idx)  
+            if self.hyp.align_prototypes:
+                if local_bb_features is not None:
+                    obj_distances_bb = compute_dist2global(local_proto=local_bb_features, 
+                                                        global_proto=self.global_obj_protos["bb"], 
+                                                        metric=self.hyp.distance_metric)
+                    assert len(obj_distances_bb.shape) == 1 and obj_distances_bb.shape[0] == local_bb_features.shape[0]
+                    loss[3] = obj_distances_bb.mean()
+                else:
+                    loss[3] = 0.0
         
-        assert len(obj_distances_bb.shape) == 1 and obj_distances_bb.shape[0] == local_bb_features.shape[0]
-        loss[3] = obj_distances_bb.mean()
-        
-        if self.hyp.align_head:
-            local_head_features = self.extractor(embds=embds[-1], fg_mask=fg_mask, target_gt_idx=target_gt_idx)
-            obj_distances_head = compute_dist2global(local_proto=local_head_features, 
-                                                     global_proto=self.global_obj_protos["head"], 
-                                                     metric=self.hyp.distance_metric)
             
-            assert len(obj_distances_head.shape) == 1 and obj_distances_head.shape[0] == local_head_features.shape[0]
-            loss[4] = obj_distances_head.mean()
-
+            if self.hyp.align_head:
+                local_head_features = self.extractor(embds=embds[-1], fg_mask=fg_mask, target_gt_idx=target_gt_idx)
+                if self.hyp.align_prototypes:
+                    if local_head_features is not None:
+                        obj_distances_head = compute_dist2global(local_proto=local_head_features, 
+                                                                global_proto=self.global_obj_protos["head"], 
+                                                                metric=self.hyp.distance_metric)
+                        assert len(obj_distances_head.shape) == 1 and obj_distances_head.shape[0] == local_head_features.shape[0]
+                        loss[4] = obj_distances_head.mean()
+                    else:
+                        loss[4] = 0.0
+                
+            features = {"bb": local_bb_features, "head": local_head_features if self.hyp.align_head else None}
+        else:
+            features = {"bb": None, "head": None}
     
         loss[0] *= self.hyp.box  # box gain
         loss[1] *= self.hyp.cls  # cls gain
@@ -333,8 +344,6 @@ class v8DetectionLoss:
         loss[3] *= self.hyp.ptl_bb  # ptl gain bb
         if self.hyp.align_head:
             loss[4] *= self.hyp.ptl_head  # ptl gain head
-
-        features = {"bb": local_bb_features, "head": local_head_features if self.hyp.align_head else None}
 
         return loss * batch_size, loss.detach(), features  # loss(box, cls, dfl, ptl_bb, ptl_head)
 
