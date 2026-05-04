@@ -133,7 +133,8 @@ ptl_bb: 1.0 # (float) Prototype loss gain for the backbone
 ptl_head: 1.0 # (float) Prototype loss gain for the head
 distance_metric: "l2" # (string) metric used to calculate prototype distance. Alternative is "cosine". 
 single_proto_obj: True # (bool) whether to extract a single object prototype (embedding cluster) 
-align_head: True # (bool) whether to apply prototype alignment to the head in addition to the backbone.
+align_bb: False # (bool) whether to apply prototype alignment to the backbone.
+align_head: True # (bool) whether to apply prototype alignment to the head.
 features_out_dir: #(str) where to save the features extracted during training.
 
 

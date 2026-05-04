@@ -211,8 +211,8 @@ class v8DetectionLoss:
 
         # load global prototypes
         if self.hyp.align_prototypes:
-            self.global_obj_protos = {"bb": torch.load(self.hyp.global_obj_protos["bb"]).to(device),
-                                    "head": torch.load(self.hyp.global_obj_protos["head"]).to(device) if self.hyp.align_head else None}
+            self.global_obj_protos = {"bb": torch.load(self.hyp.global_obj_protos["bb"]).to(device).detach(),
+                                      "head": torch.load(self.hyp.global_obj_protos["head"]).to(device).detach() if self.hyp.align_head else None}
             for v in self.global_obj_protos.values():
                 if v is not None:
                     assert len(v.shape) == 2
@@ -259,7 +259,8 @@ class v8DetectionLoss:
 
     def __call__(self, preds: Any, embds: list, batch: Dict[str, torch.Tensor], return_features: bool = False) -> Tuple[torch.Tensor, torch.Tensor]:
         """Calculate the sum of the loss for box, cls and dfl multiplied by batch size."""
-        loss = torch.zeros(4, device=self.device)  if not self.hyp.align_head else torch.zeros(5, device=self.device) # box, cls, dfl, ptl_bb, ptl_head  
+        n_lt = 3 + int(self.hyp.align_bb) + int(self.hyp.align_head)
+        loss = torch.zeros(n_lt, device=self.device) # box, cls, dfl, ptl_bb, ptl_head  
         feats = preds[1] if isinstance(preds, tuple) else preds
         pred_distri, pred_scores = torch.cat([xi.view(feats[0].shape[0], self.no, -1) for xi in feats], 2).split(
             (self.reg_max * 4, self.nc), 1
@@ -310,40 +311,51 @@ class v8DetectionLoss:
 
         # generate batch prototypes
         if return_features or self.hyp.align_prototypes:
-            local_bb_features = self.extractor(embds=embds[:-1], fg_mask=fg_mask, target_gt_idx=target_gt_idx)  
-            if self.hyp.align_prototypes:
-                if local_bb_features is not None:
-                    obj_distances_bb = compute_dist2global(local_proto=local_bb_features, 
-                                                        global_proto=self.global_obj_protos["bb"], 
-                                                        metric=self.hyp.distance_metric)
-                    assert len(obj_distances_bb.shape) == 1 and obj_distances_bb.shape[0] == local_bb_features.shape[0]
-                    loss[3] = obj_distances_bb.mean()
-                else:
-                    loss[3] = 0.0
+            if self.hyp.align_bb: 
+                local_bb_features = self.extractor(embds=embds[:-1], fg_mask=fg_mask, target_gt_idx=target_gt_idx)  
+                if self.hyp.align_prototypes:
+                    # This guards against cases where a prootype could not be extracted form the data (not sure why this happens)
+                    if local_bb_features is not None:
+                        obj_distances_bb = compute_dist2global(local_proto=local_bb_features, 
+                                                            global_proto=self.global_obj_protos["bb"], 
+                                                            metric=self.hyp.distance_metric)
+                        assert len(obj_distances_bb.shape) == 1 and obj_distances_bb.shape[0] == local_bb_features.shape[0]
+                        loss[3] = obj_distances_bb.mean()
+                    else:
+                        loss[3] = 0.0
         
-            
             if self.hyp.align_head:
                 local_head_features = self.extractor(embds=embds[-1], fg_mask=fg_mask, target_gt_idx=target_gt_idx)
                 if self.hyp.align_prototypes:
+                    slot = 4 if self.hyp.align_bb else 3
+                    # This guards against cases where a prootype could not be extracted form the data (not sure why this happens)
                     if local_head_features is not None:
                         obj_distances_head = compute_dist2global(local_proto=local_head_features, 
-                                                                global_proto=self.global_obj_protos["head"], 
-                                                                metric=self.hyp.distance_metric)
+                                                                 global_proto=self.global_obj_protos["head"], 
+                                                                 metric=self.hyp.distance_metric)
                         assert len(obj_distances_head.shape) == 1 and obj_distances_head.shape[0] == local_head_features.shape[0]
-                        loss[4] = obj_distances_head.mean()
+                        loss[slot] = obj_distances_head.mean()
                     else:
-                        loss[4] = 0.0
+                        loss[slot] = 0.0
                 
-            features = {"bb": local_bb_features, "head": local_head_features if self.hyp.align_head else None}
+            features = {"bb": local_bb_features if self.hyp.align_bb else None, "head": local_head_features if self.hyp.align_head else None}
         else:
             features = {"bb": None, "head": None}
     
         loss[0] *= self.hyp.box  # box gain
         loss[1] *= self.hyp.cls  # cls gain
         loss[2] *= self.hyp.dfl  # dfl gain
-        loss[3] *= self.hyp.ptl_bb  # ptl gain bb
-        if self.hyp.align_head:
-            loss[4] *= self.hyp.ptl_head  # ptl gain head
+
+        if n_lt > 3:
+            if n_lt == 4:
+                if self.hyp.align_bb:
+                    loss[3] *= self.hyp.ptl_bb
+                else:
+                    loss[3] *= self.hyp.ptl_head
+            elif n_lt == 5:
+                loss[3] *= self.hyp.ptl_bb
+                loss[4] *= self.hyp.ptl_head
+
 
         return loss * batch_size, loss.detach(), features  # loss(box, cls, dfl, ptl_bb, ptl_head)
 
