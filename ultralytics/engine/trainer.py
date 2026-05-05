@@ -357,7 +357,7 @@ class BaseTrainer:
                     batch = self.preprocess_batch(batch)
                     _, _, features = model(batch, return_features=True)
 
-                    if features["bb"] is None:
+                    if features["bb"] is None and features["head"] is None:
                         continue  # skip if no features extracted (e.g., no foreground objects)
 
                 all_features.append({k: v.cpu() if v is not None else None for k, v in features.items()})
@@ -365,9 +365,10 @@ class BaseTrainer:
         
         model.train()
 
-        # save 
-        all_features_bb = torch.cat([f["bb"] for f in all_features], dim=0)
-        torch.save(all_features_bb, f"{self.args.features_out_dir}/features_bb.pt")
+        # save
+        if self.args.align_bb:
+            all_features_bb = torch.cat([f["bb"] for f in all_features], dim=0)
+            torch.save(all_features_bb, f"{self.args.features_out_dir}/features_bb.pt")
         if self.args.align_head:
             all_features_head = torch.cat([f["head"] for f in all_features], dim=0)
             torch.save(all_features_head, f"{self.args.features_out_dir}/features_head.pt")
