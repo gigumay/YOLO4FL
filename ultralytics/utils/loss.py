@@ -211,7 +211,7 @@ class v8DetectionLoss:
 
         # load global prototypes
         if self.hyp.align_prototypes:
-            self.global_obj_protos = {"bb": torch.load(self.hyp.global_obj_protos["bb"]).to(device).detach(),
+            self.global_obj_protos = {"bb": torch.load(self.hyp.global_obj_protos["bb"]).to(device).detach() if self.hyp.align_bb else None,
                                       "head": torch.load(self.hyp.global_obj_protos["head"]).to(device).detach() if self.hyp.align_head else None}
             for v in self.global_obj_protos.values():
                 if v is not None:
