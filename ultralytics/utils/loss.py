@@ -142,7 +142,42 @@ class BboxLoss(nn.Module):
 
         return loss_iou, loss_dfl
     
-        
+
+class ObjBgContrastiveLoss(nn.Module):
+    """
+    Contrastive repulsion loss between object prototypes
+    and hard-negative background features.
+    """
+
+    def __init__(self, margin: float = 1.0,):
+        super().__init__()
+        self.margin = margin
+
+
+    def forward(self, obj_feats: torch.Tensor, bg_feats: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            obj_feats (torch.Tensor): object features of shape (N_obj, C)
+            bg_feats (torch.Tensor): background features of shape(N_bg, C)
+        Returns:
+            scalar loss
+        """
+        # empty case guard
+        if obj_feats.numel() == 0 or bg_feats.numel() == 0:
+            return torch.tensor(0.0, device=obj_feats.device)
+
+
+        obj_feats_norm = F.normalize(obj_feats, p=2, dim=1)
+        bg_feats_norm = F.normalize(bg_feats, p=2, dim=1)
+
+        # Pairwise L2 distance (N_obj, N_bg)
+        dists = torch.cdist(obj_feats_norm, bg_feats_norm ,p=2)
+
+        # margin loss
+        loss = F.relu(self.margin - dists).pow(2)
+
+        return loss.mean()
+
 
 class RotatedBboxLoss(BboxLoss):
     """Criterion class for computing training losses for rotated bounding boxes."""
@@ -228,6 +263,7 @@ class v8DetectionLoss:
         self.assigner = TaskAlignedAssigner(topk=tal_topk, num_classes=self.nc, alpha=0.5, beta=6.0)
         self.extractor = TALFeatureExtractor()
         self.bbox_loss = BboxLoss(m.reg_max).to(device)
+        self.contrastive_loss = ObjBgContrastiveLoss(margin=1.0).to(device) if self.hyp.use_contrastive_loss else None
         self.proj = torch.arange(m.reg_max, dtype=torch.float, device=device)
 
     def preprocess(self, targets: torch.Tensor, batch_size: int, scale_tensor: torch.Tensor) -> torch.Tensor:
@@ -259,8 +295,10 @@ class v8DetectionLoss:
 
     def __call__(self, preds: Any, embds: list, batch: Dict[str, torch.Tensor], return_features: bool = False) -> Tuple[torch.Tensor, torch.Tensor]:
         """Calculate the sum of the loss for box, cls and dfl multiplied by batch size."""
-        n_lt = 3 + int(self.hyp.align_bb) + int(self.hyp.align_head)
-        loss = torch.zeros(n_lt, device=self.device) # box, cls, dfl, ptl_bb, ptl_head  
+        alignment_terms = int(self.hyp.align_bb) + int(self.hyp.align_head)
+        bg_terms = alignment_terms * int(self.hyp.use_backgrounds)
+        n_lt = 3 + alignment_terms + bg_terms 
+        loss = torch.zeros(n_lt, device=self.device) # box, cls, dfl, ptl_bb, ptl_head,bgl_bb, bgl_head
         feats = preds[1] if isinstance(preds, tuple) else preds
         pred_distri, pred_scores = torch.cat([xi.view(feats[0].shape[0], self.no, -1) for xi in feats], 2).split(
             (self.reg_max * 4, self.nc), 1
@@ -309,36 +347,61 @@ class v8DetectionLoss:
                 pred_distri, pred_bboxes, anchor_points, target_bboxes, target_scores, target_scores_sum, fg_mask
             )
 
-        # generate batch prototypes
+        """
+        Generate prototypes. Note that align_bb/align_head will have different values during the first round, 
+        where I extract prototypes but don;t align yet. Hence this needs to be checked below.
+        """
         if return_features or self.hyp.align_prototypes:
             if self.hyp.align_bb: 
-                local_bb_features = self.extractor(embds=embds[:-1], fg_mask=fg_mask, target_gt_idx=target_gt_idx)  
+                local_obj_features_bb = self.extractor(embds=embds[:-1], fg_mask=fg_mask, target_gt_idx=target_gt_idx)  
+                if self.hyp.use_backgrounds:
+                    local_bg_features_bb = self.extractor(embds=embds[:-1], fg_mask=fg_mask, target_gt_idx=target_gt_idx,
+                                                          mode="background", pred_scores=pred_scores.detach())
+                else:
+                    local_bg_features_bb = None
                 if self.hyp.align_prototypes:
                     # This guards against cases where a prootype could not be extracted form the data (not sure why this happens)
-                    if local_bb_features is not None:
-                        obj_distances_bb = compute_dist2global(local_proto=local_bb_features, 
-                                                            global_proto=self.global_obj_protos["bb"], 
-                                                            metric=self.hyp.distance_metric)
-                        assert len(obj_distances_bb.shape) == 1 and obj_distances_bb.shape[0] == local_bb_features.shape[0]
+                    if local_obj_features_bb is not None:
+                        obj_distances_bb = compute_dist2global(local_proto=local_obj_features_bb, 
+                                                               global_proto=self.global_obj_protos["bb"], 
+                                                               metric=self.hyp.distance_metric)
+                        assert len(obj_distances_bb.shape) == 1 and obj_distances_bb.shape[0] == local_obj_features_bb.shape[0]
                         loss[3] = obj_distances_bb.mean()
+
+                        if self.hyp.use_backgrounds:
+                            loss[4] = self.contrastive_loss(local_obj_features_bb, local_bg_features_bb)
+
                     else:
                         loss[3] = 0.0
+                        if self.hyp.use_backgrounds:
+                            loss[4] = 0.0
         
             if self.hyp.align_head:
-                local_head_features = self.extractor(embds=embds[-1], fg_mask=fg_mask, target_gt_idx=target_gt_idx)
+                local_obj_features_head = self.extractor(embds=embds[-1], fg_mask=fg_mask, target_gt_idx=target_gt_idx)
+                if self.hyp.use_backgrounds:
+                    local_bg_features_head = self.extractor(embds=embds[-1], fg_mask=fg_mask, target_gt_idx=target_gt_idx,
+                                                            mode="background", pred_scores=pred_scores.detach())
+                else:
+                    local_bg_features_head = None
                 if self.hyp.align_prototypes:
-                    slot = 4 if self.hyp.align_bb else 3
+                    slot = len(loss) - 1 if not self.hyp.use_backgrounds else len(loss) - 2
                     # This guards against cases where a prootype could not be extracted form the data (not sure why this happens)
-                    if local_head_features is not None:
-                        obj_distances_head = compute_dist2global(local_proto=local_head_features, 
+                    if local_obj_features_head is not None:
+                        obj_distances_head = compute_dist2global(local_proto=local_obj_features_head, 
                                                                  global_proto=self.global_obj_protos["head"], 
                                                                  metric=self.hyp.distance_metric)
-                        assert len(obj_distances_head.shape) == 1 and obj_distances_head.shape[0] == local_head_features.shape[0]
+                        assert len(obj_distances_head.shape) == 1 and obj_distances_head.shape[0] == local_obj_features_head.shape[0]
                         loss[slot] = obj_distances_head.mean()
+
+                        if self.hyp.use_backgrounds:
+                            loss[-1] = self.contrastive_loss(local_obj_features_head, local_bg_features_head)
+
                     else:
                         loss[slot] = 0.0
+                        if self.hyp.use_backgrounds:
+                            loss[-1] = 0.0
                 
-            features = {"bb": local_bb_features if self.hyp.align_bb else None, "head": local_head_features if self.hyp.align_head else None}
+            features = {"bb": local_obj_features_bb if self.hyp.align_bb else None, "head": local_obj_features_head if self.hyp.align_head else None}
         else:
             features = {"bb": None, "head": None}
     

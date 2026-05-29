@@ -150,9 +150,14 @@ class DetectionTrainer(BaseTrainer):
 
         if self.args.align_bb:
             self.loss_names.append("ptl_bb")
+            if self.args.use_backgrounds:
+                self.loss_names.append("bgl_bb")
 
         if self.args.align_head:
             self.loss_names.append("ptl_head")
+            if self.args.use_backgrounds:
+                self.loss_names.append("bgl_head")
+
 
         self.loss_names = tuple(self.loss_names)
 

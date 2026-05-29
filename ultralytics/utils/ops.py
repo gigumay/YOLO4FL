@@ -90,12 +90,12 @@ def compute_dist2global(local_proto: torch.Tensor, global_proto: torch.Tensor, m
     Returns:
         distances (torch.Tensor):   Distances to closest global prototypes with shape (n_local,).
     """
+    local_norm = torch.nn.functional.normalize(local_proto, p=2, dim=1)
+    global_norm = torch.nn.functional.normalize(global_proto, p=2, dim=1)
     if metric == "cosine":
-        local_norm = torch.nn.functional.normalize(local_proto, p=2, dim=1)
-        global_norm = torch.nn.functional.normalize(global_proto, p=2, dim=1)
         dist_matrix = 1 - torch.mm(local_norm, global_norm.t())
     else:
-        dist_matrix = torch.cdist(local_proto, global_proto, p=2)
+        dist_matrix = torch.cdist(local_norm, global_norm, p=2)
 
     return dist_matrix.min(dim=1).values
 

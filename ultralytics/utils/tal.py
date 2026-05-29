@@ -368,61 +368,88 @@ class RotatedTaskAlignedAssigner(TaskAlignedAssigner):
 
 
 
+
 class TALFeatureExtractor(nn.Module):
     """
-    Extract object-level features from feature maps using TAL assignments.
-    
-    Flattens and concatenates feature maps across levels (matching make_anchors order),
-    then pools assigned anchor features per GT object, optionally weighted by align_metric.
+    Extract object-level or hard-negative background features
+    from feature maps using TAL assignments.
     """
 
     def __init__(self):
         super().__init__()
 
-    def forward(
-        self,
-        embds: list,
-        fg_mask: torch.Tensor,
-        target_gt_idx: torch.Tensor,
-    ) -> torch.Tensor:
+    def forward(self, embds: list, fg_mask: torch.Tensor, target_gt_idx: torch.Tensor = None, pred_scores: torch.Tensor = None,
+                mode: str = "foreground") -> torch.Tensor:
         """
         Args:
-            embds:          list of feature maps [(B, C, H_i, W_i), ...], same level 
-                            order as strides passed to make_anchors.
-            fg_mask:        (B, A) bool — foreground anchor mask from TAL.
-            target_gt_idx:  (B, A) long — which GT each anchor is assigned to.
-
+            embds (list):                   list of feature maps [(B, C, H_i, W_i), ...]
+            fg_mask (torch.Tensor):         foreground anchor mask from TAL of shape (B, A), where A is total number of anchors.
+            target_gt_idx (torch.Tensor):   GT assignment per anchor of shape (B, A). Required for foreground mode.
+            pred_scores (torch.Tensor):     raw classification logits of shape (B, A, num_classes). Required for background mode.
+            mode (str):                     "foreground" or "background". Determines which features to extract.
         Returns:
-            obj_features:   (N_objects, C) — one pooled feature vector per GT object
-                            across the batch. Returns empty tensor if no foreground anchors.
+            foreground (torch.Tensor):      tensor of extracted features for foreground objects with shape (N_objects, C)
+            background (torch.Tensor):      tensor of extracted features for hard-negative background objects with shape (N_hard_negatives, C)
         """
 
-        # flatten spatial dims and concat levels: (B, C, A_total)
-        # flatten(2) is row-major (H, W) which matches make_anchors meshgrid(indexing='ij')
+        assert mode in ["foreground", "background"]
+        
         all_feats = torch.cat([f.flatten(2) for f in embds], dim=2)
-
         bs = fg_mask.shape[0]
-        obj_features = []
+        out_features = []
 
         for b in range(bs):
-            pos_idx = fg_mask[b].nonzero(as_tuple=True)[0]  # (P,)
-            if pos_idx.numel() == 0:
-                continue
+            if mode == "foreground":
+                pos_idx = fg_mask[b].nonzero(as_tuple=True)[0]
 
-            gt_idx = target_gt_idx[b, pos_idx]    # (P,)
-            feats_pos = all_feats[b, :, pos_idx]  # (C, P)
+                if pos_idx.numel() == 0:
+                    continue
 
-            for g in gt_idx.unique():
-                sel_mask = gt_idx == g
-                sel_feats = feats_pos[:, sel_mask]  # (C, K)
+                gt_idx = target_gt_idx[b, pos_idx]      # (P,)
+                feats_pos = all_feats[b, :, pos_idx]    # (C, P)
 
-                obj_features.append(sel_feats.mean(dim=1))
+                for g in gt_idx.unique():
+                    sel_mask = gt_idx == g
+                    sel_feats = feats_pos[:, sel_mask]  # (C, K)
+                    # mean pool anchors assigned to same GT
+                    obj_proto = sel_feats.mean(dim=1)
+                    out_features.append(obj_proto)
+            elif mode == "background":
 
-        if not obj_features:
+                assert pred_scores is not None, "pred_scores required for background extraction"
+
+                # positive anchors
+                pos_idx = fg_mask[b].nonzero(as_tuple=True)[0]
+                # skip images with no objects
+                if pos_idx.numel() == 0:
+                    continue
+
+                # number of GT objects
+                n_objects = target_gt_idx[b, pos_idx].unique().numel()
+
+                # background anchors
+                bg_idx = (~fg_mask[b]).nonzero(as_tuple=True)[0]
+                if bg_idx.numel() == 0:
+                    continue
+
+                # predicted class probabilities
+                bg_scores = pred_scores[b, bg_idx].sigmoid()
+                # hardness = highest predicted class confidence
+                bg_hardness = bg_scores.max(dim=-1).values
+                # take as many hard negatives as GT objects
+                k = min(n_objects, bg_idx.numel())
+
+                topk_idx = torch.topk(bg_hardness,k=k,largest=True).indices
+                hard_bg_idx = bg_idx[topk_idx]
+                # extract features
+                hard_bg_feats = all_feats[b, :, hard_bg_idx]  # (C, k)
+                # keep each hard negative separately
+                out_features.extend(hard_bg_feats.T)
+
+        if len(out_features) == 0:
             return None
 
-        return torch.stack(obj_features)  # (N_objects, C)
-
+        return torch.stack(out_features)
 
 
 def make_anchors(feats, strides, grid_cell_offset=0.5):
