@@ -265,6 +265,29 @@ class v8DetectionLoss:
         self.bbox_loss = BboxLoss(m.reg_max).to(device)
         self.contrastive_loss = ObjBgContrastiveLoss(margin=1.0).to(device) if self.hyp.use_contrastive_loss else None
         self.proj = torch.arange(m.reg_max, dtype=torch.float, device=device)
+        self.gain_map = {"box": self.hyp.box,
+                         "cls": self.hyp.cls,
+                         "dfl": self.hyp.dfl,
+                         "ptl_bb": self.hyp.ptl_bb,
+                         "bgl_bb": self.hyp.bgl_bb,
+                         "ptl_head": self.hyp.ptl_head,
+                         "bgl_head": self.hyp.bgl_head}
+
+
+
+    def build_loss_layout(self) -> List[str]:
+        layout = ["box", "cls", "dfl"]
+        if self.hyp.align_bb:
+            layout.append("ptl_bb")
+            if self.hyp.use_backgrounds:
+                layout.append("bgl_bb")
+
+        if self.hyp.align_head:
+            layout.append("ptl_head")
+            if self.hyp.use_backgrounds:
+                layout.append("bgl_head")
+
+        return layout
 
     def preprocess(self, targets: torch.Tensor, batch_size: int, scale_tensor: torch.Tensor) -> torch.Tensor:
         """Preprocess targets by converting to tensor format and scaling coordinates."""
@@ -295,10 +318,10 @@ class v8DetectionLoss:
 
     def __call__(self, preds: Any, embds: list, batch: Dict[str, torch.Tensor], return_features: bool = False) -> Tuple[torch.Tensor, torch.Tensor]:
         """Calculate the sum of the loss for box, cls and dfl multiplied by batch size."""
-        alignment_terms = int(self.hyp.align_bb) + int(self.hyp.align_head)
-        bg_terms = alignment_terms * int(self.hyp.use_backgrounds)
-        n_lt = 3 + alignment_terms + bg_terms 
-        loss = torch.zeros(n_lt, device=self.device) # box, cls, dfl, ptl_bb, ptl_head,bgl_bb, bgl_head
+        loss_layout = self.build_loss_layout()
+        loss_idx = {name: i for i, name in enumerate(loss_layout)}
+        loss = torch.zeros(len(loss_layout), device=self.device)
+
         feats = preds[1] if isinstance(preds, tuple) else preds
         pred_distri, pred_scores = torch.cat([xi.view(feats[0].shape[0], self.no, -1) for xi in feats], 2).split(
             (self.reg_max * 4, self.nc), 1
@@ -338,12 +361,12 @@ class v8DetectionLoss:
 
         # Cls loss
         # loss[1] = self.varifocal_loss(pred_scores, target_scores, target_labels) / target_scores_sum  # VFL way
-        loss[1] = self.bce(pred_scores, target_scores.to(dtype)).sum() / target_scores_sum  # BCE
+        loss[loss_idx["cls"]] = self.bce(pred_scores, target_scores.to(dtype)).sum() / target_scores_sum  # BCE
 
         # Bbox loss
         if fg_mask.sum():
             target_bboxes /= stride_tensor
-            loss[0], loss[2] = self.bbox_loss(
+            loss[loss_idx["box"]], loss[loss_idx["dfl"]] = self.bbox_loss(
                 pred_distri, pred_bboxes, anchor_points, target_bboxes, target_scores, target_scores_sum, fg_mask
             )
 
@@ -366,15 +389,15 @@ class v8DetectionLoss:
                                                                global_proto=self.global_obj_protos["bb"], 
                                                                metric=self.hyp.distance_metric)
                         assert len(obj_distances_bb.shape) == 1 and obj_distances_bb.shape[0] == local_obj_features_bb.shape[0]
-                        loss[3] = obj_distances_bb.mean()
+                        loss[loss_idx["ptl_bb"]] = obj_distances_bb.mean()
 
                         if self.hyp.use_backgrounds:
-                            loss[4] = self.contrastive_loss(local_obj_features_bb, local_bg_features_bb)
+                            loss[loss_idx["bgl_bb"]] = self.contrastive_loss(local_obj_features_bb, local_bg_features_bb)
 
                     else:
-                        loss[3] = 0.0
+                        loss[loss_idx["ptl_bb"]] = 0.0
                         if self.hyp.use_backgrounds:
-                            loss[4] = 0.0
+                            loss[loss_idx["bgl_bb"]] = 0.0
         
             if self.hyp.align_head:
                 local_obj_features_head = self.extractor(embds=embds[-1], fg_mask=fg_mask, target_gt_idx=target_gt_idx)
@@ -384,42 +407,29 @@ class v8DetectionLoss:
                 else:
                     local_bg_features_head = None
                 if self.hyp.align_prototypes:
-                    slot = len(loss) - 1 if not self.hyp.use_backgrounds else len(loss) - 2
                     # This guards against cases where a prootype could not be extracted form the data (not sure why this happens)
                     if local_obj_features_head is not None:
                         obj_distances_head = compute_dist2global(local_proto=local_obj_features_head, 
                                                                  global_proto=self.global_obj_protos["head"], 
                                                                  metric=self.hyp.distance_metric)
                         assert len(obj_distances_head.shape) == 1 and obj_distances_head.shape[0] == local_obj_features_head.shape[0]
-                        loss[slot] = obj_distances_head.mean()
+                        loss[loss_idx["ptl_head"]] = obj_distances_head.mean()
 
                         if self.hyp.use_backgrounds:
-                            loss[-1] = self.contrastive_loss(local_obj_features_head, local_bg_features_head)
+                            loss[loss_idx["bgl_head"]] = self.contrastive_loss(local_obj_features_head, local_bg_features_head)
 
                     else:
-                        loss[slot] = 0.0
+                        loss[loss_idx["ptl_head"]] = 0.0
                         if self.hyp.use_backgrounds:
-                            loss[-1] = 0.0
+                            loss[loss_idx["bgl_head"]] = 0.0
                 
             features = {"bb": local_obj_features_bb if self.hyp.align_bb else None, "head": local_obj_features_head if self.hyp.align_head else None}
         else:
             features = {"bb": None, "head": None}
     
-        loss[0] *= self.hyp.box  # box gain
-        loss[1] *= self.hyp.cls  # cls gain
-        loss[2] *= self.hyp.dfl  # dfl gain
-
-        if n_lt > 3:
-            if n_lt == 4:
-                if self.hyp.align_bb:
-                    loss[3] *= self.hyp.ptl_bb
-                else:
-                    loss[3] *= self.hyp.ptl_head
-            elif n_lt == 5:
-                loss[3] *= self.hyp.ptl_bb
-                loss[4] *= self.hyp.ptl_head
-
-
+        for name, idx in loss_idx.items():
+            loss[idx] *= self.gain_map[name]
+            
         return loss * batch_size, loss.detach(), features  # loss(box, cls, dfl, ptl_bb, ptl_head)
 
 
