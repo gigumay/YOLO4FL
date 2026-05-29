@@ -414,6 +414,7 @@ class TALFeatureExtractor(nn.Module):
                     # mean pool anchors assigned to same GT
                     obj_proto = sel_feats.mean(dim=1)
                     out_features.append(obj_proto)
+            
             elif mode == "background":
 
                 assert pred_scores is not None, "pred_scores required for background extraction"

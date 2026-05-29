@@ -385,7 +385,7 @@ class BaseModel(torch.nn.Module):
             preds = self.forward(batch["img"], embed=[16,19,22,23])
             preds, embds = preds[-1], preds[:-1]
         else:
-            embds = self.forward(batch["img"], embed=[16,19,22, 23])
+            embds = self.forward(batch["img"], embed=[16,19,22])
 
         return self.criterion(preds, embds, batch, return_features=return_features)
 

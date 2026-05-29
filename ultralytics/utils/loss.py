@@ -263,7 +263,7 @@ class v8DetectionLoss:
         self.assigner = TaskAlignedAssigner(topk=tal_topk, num_classes=self.nc, alpha=0.5, beta=6.0)
         self.extractor = TALFeatureExtractor()
         self.bbox_loss = BboxLoss(m.reg_max).to(device)
-        self.contrastive_loss = ObjBgContrastiveLoss(margin=1.0).to(device) if self.hyp.use_contrastive_loss else None
+        self.contrastive_loss = ObjBgContrastiveLoss(margin=1.0).to(device) if self.hyp.use_backgrounds else None
         self.proj = torch.arange(m.reg_max, dtype=torch.float, device=device)
         self.gain_map = {"box": self.hyp.box,
                          "cls": self.hyp.cls,
@@ -322,6 +322,7 @@ class v8DetectionLoss:
         loss_idx = {name: i for i, name in enumerate(loss_layout)}
         loss = torch.zeros(len(loss_layout), device=self.device)
 
+
         feats = preds[1] if isinstance(preds, tuple) else preds
         pred_distri, pred_scores = torch.cat([xi.view(feats[0].shape[0], self.no, -1) for xi in feats], 2).split(
             (self.reg_max * 4, self.nc), 1
@@ -376,9 +377,11 @@ class v8DetectionLoss:
         """
         if return_features or self.hyp.align_prototypes:
             if self.hyp.align_bb: 
-                local_obj_features_bb = self.extractor(embds=embds[:-1], fg_mask=fg_mask, target_gt_idx=target_gt_idx)  
+                local_obj_features_bb = self.extractor(embds=embds, fg_mask=fg_mask, target_gt_idx=target_gt_idx)  
+                assert local_obj_features_bb.shape[-1] != (self.nc + self.reg_max * 4), "Feature MixUp!"
+
                 if self.hyp.use_backgrounds:
-                    local_bg_features_bb = self.extractor(embds=embds[:-1], fg_mask=fg_mask, target_gt_idx=target_gt_idx,
+                    local_bg_features_bb = self.extractor(embds=embds, fg_mask=fg_mask, target_gt_idx=target_gt_idx,
                                                           mode="background", pred_scores=pred_scores.detach())
                 else:
                     local_bg_features_bb = None
@@ -400,9 +403,11 @@ class v8DetectionLoss:
                             loss[loss_idx["bgl_bb"]] = 0.0
         
             if self.hyp.align_head:
-                local_obj_features_head = self.extractor(embds=embds[-1], fg_mask=fg_mask, target_gt_idx=target_gt_idx)
+                local_obj_features_head = self.extractor(embds=preds, fg_mask=fg_mask, target_gt_idx=target_gt_idx)
+                assert local_obj_features_bb.shape[-1] != (self.nc + self.reg_max * 4), "Feature MixUp!"
+                
                 if self.hyp.use_backgrounds:
-                    local_bg_features_head = self.extractor(embds=embds[-1], fg_mask=fg_mask, target_gt_idx=target_gt_idx,
+                    local_bg_features_head = self.extractor(embds=preds, fg_mask=fg_mask, target_gt_idx=target_gt_idx,
                                                             mode="background", pred_scores=pred_scores.detach())
                 else:
                     local_bg_features_head = None
