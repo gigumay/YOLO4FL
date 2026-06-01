@@ -436,7 +436,8 @@ class v8DetectionLoss:
                     # Project local features and the (raw-space) frozen global prototype
                     obj_emb = self._project(local_obj_features)
                     bg_emb = self._project(local_bg_features) if self.hyp.use_backgrounds else None
-                    proto_emb = self._project(self.global_obj_protos)
+                    # Detach so the prototype is a pure (fixed) target in the current embedding space
+                    proto_emb = self._project(self.global_obj_protos).detach()
 
                     if self.use_contr_loss:
                         loss[loss_idx["ptcl"]] = self.proto_contrastive_loss(obj_emb, proto_emb, bg_emb)

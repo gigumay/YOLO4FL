@@ -148,15 +148,12 @@ class DetectionTrainer(BaseTrainer):
         """Return a DetectionValidator for YOLO model validation."""
         self.loss_names = ["box_loss", "cls_loss", "dfl_loss"]
 
-        if self.args.align_bb:
-            self.loss_names.append("ptl_bb")
+        if not self.args.use_contr_loss:
+            self.loss_names.append("ptl")
             if self.args.use_backgrounds:
-                self.loss_names.append("bgl_bb")
-
-        if self.args.align_head:
-            self.loss_names.append("ptl_head")
-            if self.args.use_backgrounds:
-                self.loss_names.append("bgl_head")
+                self.loss_names.append("bgl")
+        else:
+            self.loss_names.append("ptcl")
 
 
         self.loss_names = tuple(self.loss_names)
