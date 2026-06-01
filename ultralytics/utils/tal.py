@@ -373,10 +373,19 @@ class TALFeatureExtractor(nn.Module):
     """
     Extract object-level or hard-negative background features
     from feature maps using TAL assignments.
+
+    Args:
+        bg_ratio (float): Number of background negatives drawn per image, as a multiple of the number of
+            GT objects in that image (k ≈ bg_ratio * n_objects). bg_ratio=1.0 matches the legacy behavior.
+        hard_frac (float): Fraction of the drawn negatives taken as the hardest (highest predicted
+            confidence); the remainder are sampled at random for broader coverage. hard_frac=1.0 takes
+            only the hardest negatives (legacy behavior).
     """
 
-    def __init__(self):
+    def __init__(self, bg_ratio: float = 1.0, hard_frac: float = 1.0):
         super().__init__()
+        self.bg_ratio = bg_ratio
+        self.hard_frac = hard_frac
 
     def forward(self, embds: list, fg_mask: torch.Tensor, target_gt_idx: torch.Tensor = None, pred_scores: torch.Tensor = None,
                 mode: str = "foreground") -> torch.Tensor:
@@ -433,18 +442,32 @@ class TALFeatureExtractor(nn.Module):
                 if bg_idx.numel() == 0:
                     continue
 
-                # predicted class probabilities
-                bg_scores = pred_scores[b, bg_idx].sigmoid()
-                # hardness = highest predicted class confidence
-                bg_hardness = bg_scores.max(dim=-1).values
-                # take as many hard negatives as GT objects
-                k = min(n_objects, bg_idx.numel())
+                # predicted class probabilities; hardness = highest predicted class confidence
+                bg_hardness = pred_scores[b, bg_idx].sigmoid().max(dim=-1).values
 
-                topk_idx = torch.topk(bg_hardness,k=k,largest=True).indices
-                hard_bg_idx = bg_idx[topk_idx]
-                # extract features
+                # total negatives for this image, split into hardest + random (positions into bg_idx)
+                k = min(int(self.bg_ratio * n_objects), bg_idx.numel())
+                n_hard = min(int(round(self.hard_frac * k)), k)
+
+                hard_sel = torch.topk(bg_hardness, k=n_hard, largest=True).indices if n_hard > 0 \
+                    else bg_idx.new_empty(0, dtype=torch.long)
+
+                # random negatives drawn from the remaining (non-hardest) backgrounds for broader coverage
+                n_rand = k - n_hard
+                if n_rand > 0:
+                    remaining = torch.ones(bg_idx.numel(), dtype=torch.bool, device=bg_idx.device)
+                    remaining[hard_sel] = False
+                    rem_idx = remaining.nonzero(as_tuple=True)[0]
+                    n_rand = min(n_rand, rem_idx.numel())
+                    rand_sel = rem_idx[torch.randperm(rem_idx.numel(), device=bg_idx.device)[:n_rand]] if n_rand > 0 \
+                        else bg_idx.new_empty(0, dtype=torch.long)
+                    sel = torch.cat([hard_sel, rand_sel])
+                else:
+                    sel = hard_sel
+
+                hard_bg_idx = bg_idx[sel]
+                # extract features, keeping each negative separately
                 hard_bg_feats = all_feats[b, :, hard_bg_idx]  # (C, k)
-                # keep each hard negative separately
                 out_features.extend(hard_bg_feats.T)
 
         if len(out_features) == 0:

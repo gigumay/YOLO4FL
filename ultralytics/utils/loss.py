@@ -179,6 +179,52 @@ class ObjBgContrastiveLoss(nn.Module):
         return loss.mean()
 
 
+class ProtoContrastiveLoss(nn.Module):
+    """
+    Prototype-anchored contrastive (InfoNCE / SupCon-style) loss.
+
+    For each local object embedding, the (frozen) global prototype(s) are the positives and the local
+    hard-negative background embeddings are the negatives. Unlike absolute alignment, this objective is
+    *relative*: it only requires each object to be closer to its prototype than to the backgrounds, so the
+    softmax saturates and the gradient vanishes once that holds -- leaving the features free to vary for
+    detection. This is what makes it less disruptive than pulling features onto a fixed point. Because the
+    positives are frozen and negatives are present, it has no trivial collapse solution (FedPCL-style).
+    """
+
+    def __init__(self, temperature: float = 0.1):
+        super().__init__()
+        self.temperature = temperature
+
+    def forward(self, obj_emb: torch.Tensor, proto_emb: torch.Tensor, bg_emb: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            obj_emb (torch.Tensor): object embeddings of shape (N_obj, D).
+            proto_emb (torch.Tensor): global prototype embeddings (positives) of shape (N_proto, D).
+            bg_emb (torch.Tensor): background embeddings (negatives) of shape (N_bg, D) or None.
+        Returns:
+            scalar loss
+        """
+        if obj_emb is None or obj_emb.numel() == 0 or proto_emb is None or proto_emb.numel() == 0:
+            ref = obj_emb if obj_emb is not None else proto_emb
+            return torch.tensor(0.0, device=ref.device)
+
+        obj = F.normalize(obj_emb, p=2, dim=1)
+        pos = F.normalize(proto_emb, p=2, dim=1)
+        # positive logits: (N_obj, N_proto). logsumexp over prototypes handles the multi-positive case
+        pos_logits = obj @ pos.t() / self.temperature
+
+        if bg_emb is not None and bg_emb.numel() > 0:
+            neg = F.normalize(bg_emb, p=2, dim=1)
+            neg_logits = obj @ neg.t() / self.temperature  # (N_obj, N_bg)
+            all_logits = torch.cat([pos_logits, neg_logits], dim=1)
+        else:
+            all_logits = pos_logits
+
+        # InfoNCE: -log( sum_pos exp(s) / sum_{pos+neg} exp(s) )
+        loss = torch.logsumexp(all_logits, dim=1) - torch.logsumexp(pos_logits, dim=1)
+        return loss.mean()
+
+
 class RotatedBboxLoss(BboxLoss):
     """Criterion class for computing training losses for rotated bounding boxes."""
 
@@ -261,9 +307,18 @@ class v8DetectionLoss:
         self.use_dfl = m.reg_max > 1
 
         self.assigner = TaskAlignedAssigner(topk=tal_topk, num_classes=self.nc, alpha=0.5, beta=6.0)
-        self.extractor = TALFeatureExtractor()
+        self.extractor = TALFeatureExtractor(bg_ratio=self.hyp.bg_ratio, hard_frac=self.hyp.bg_hard_frac)
         self.bbox_loss = BboxLoss(m.reg_max).to(device)
         self.contrastive_loss = ObjBgContrastiveLoss(margin=1.0).to(device) if self.hyp.use_backgrounds else None
+
+        # Prototype-alignment projection head(s), registered on the Detect module so their params are in
+        # the optimizer / checkpoint / FedAvg. When project_features is False, features pass through
+        # unchanged and behavior is identical to the raw-feature alignment.
+        self.proto_proj = m.proto_proj
+        self.project_features = self.hyp.project_features
+        # When True, a single prototype-contrastive (InfoNCE) term replaces the separate ptl + bgl losses.
+        self.contrastive_proto = self.hyp.contrastive_proto
+        self.proto_contrastive_loss = ProtoContrastiveLoss(temperature=self.hyp.proto_temp).to(device)
         self.proj = torch.arange(m.reg_max, dtype=torch.float, device=device)
         self.gain_map = {"box": self.hyp.box,
                          "cls": self.hyp.cls,
@@ -315,6 +370,15 @@ class v8DetectionLoss:
             # pred_dist = (pred_dist.view(b, a, c // 4, 4).softmax(2) * self.proj.type(pred_dist.dtype).view(1, 1, -1, 1)).sum(2)
         return dist2bbox(pred_dist, anchor_points, xywh=False)
 
+    def _project(self, feats: torch.Tensor, branch: str) -> torch.Tensor:
+        """Project pooled features through the prototype-alignment head for ``branch`` ("bb"/"head").
+
+        Returns the features unchanged when projection is disabled or no head exists for the branch, so
+        the alignment loss stays in raw feature space and behavior matches the pre-projection code path.
+        """
+        if feats is None or not self.project_features or branch not in self.proto_proj:
+            return feats
+        return self.proto_proj[branch](feats)
 
     def __call__(self, preds: Any, embds: list, batch: Dict[str, torch.Tensor], return_features: bool = False) -> Tuple[torch.Tensor, torch.Tensor]:
         """Calculate the sum of the loss for box, cls and dfl multiplied by batch size."""
@@ -388,14 +452,25 @@ class v8DetectionLoss:
                     # This guards against cases where a prootype could not be extracted form the data (not sure why this happens)
                     if local_obj_features_bb is not None:
                         assert local_obj_features_bb.shape[-1] != (self.nc + self.reg_max * 4), "Feature MixUp!"
-                        obj_distances_bb = compute_dist2global(local_proto=local_obj_features_bb, 
-                                                               global_proto=self.global_obj_protos["bb"], 
-                                                               metric=self.hyp.distance_metric)
-                        assert len(obj_distances_bb.shape) == 1 and obj_distances_bb.shape[0] == local_obj_features_bb.shape[0]
-                        loss[loss_idx["ptl_bb"]] = obj_distances_bb.mean()
+                        # Project local features and the (raw-space) frozen global prototype through the
+                        # *current* head so both live in the same embedding space at every step.
+                        obj_emb_bb = self._project(local_obj_features_bb, "bb")
+                        bg_emb_bb = self._project(local_bg_features_bb, "bb") if self.hyp.use_backgrounds else None
+                        proto_emb_bb = self._project(self.global_obj_protos["bb"], "bb")
 
-                        if self.hyp.use_backgrounds:
-                            loss[loss_idx["bgl_bb"]] = self.contrastive_loss(local_obj_features_bb, local_bg_features_bb)
+                        if self.contrastive_proto:
+                            # Single InfoNCE term replaces ptl + bgl; it occupies the ptl_bb slot (scaled by
+                            # the ptl_bb gain) while the bgl_bb slot stays 0.
+                            loss[loss_idx["ptl_bb"]] = self.proto_contrastive_loss(obj_emb_bb, proto_emb_bb, bg_emb_bb)
+                        else:
+                            obj_distances_bb = compute_dist2global(local_proto=obj_emb_bb,
+                                                                   global_proto=proto_emb_bb,
+                                                                   metric=self.hyp.distance_metric)
+                            assert len(obj_distances_bb.shape) == 1 and obj_distances_bb.shape[0] == obj_emb_bb.shape[0]
+                            loss[loss_idx["ptl_bb"]] = obj_distances_bb.mean()
+
+                            if self.hyp.use_backgrounds:
+                                loss[loss_idx["bgl_bb"]] = self.contrastive_loss(obj_emb_bb, bg_emb_bb)
 
                     else:
                         loss[loss_idx["ptl_bb"]] = 0.0
@@ -412,9 +487,11 @@ class v8DetectionLoss:
                     local_bg_features_head = None
                 if self.hyp.align_prototypes:
                     # This guards against cases where a prootype could not be extracted form the data (not sure why this happens)
+                    # NOTE: head path is the projection/contrastive hook -- to enable, build self.proto_proj["head"]
+                    # in Detect and mirror the projected bb block above (project obj/bg/proto, branch="head").
                     if local_obj_features_head is not None:
-                        assert local_obj_features_bb.shape[-1] != (self.nc + self.reg_max * 4), "Feature MixUp!"
-                        obj_distances_head = compute_dist2global(local_proto=local_obj_features_head, 
+                        assert local_obj_features_head.shape[-1] == (self.nc + self.reg_max * 4), "Feature MixUp!"
+                        obj_distances_head = compute_dist2global(local_proto=local_obj_features_head,
                                                                  global_proto=self.global_obj_protos["head"], 
                                                                  metric=self.hyp.distance_metric)
                         assert len(obj_distances_head.shape) == 1 and obj_distances_head.shape[0] == local_obj_features_head.shape[0]
