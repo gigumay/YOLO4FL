@@ -370,6 +370,7 @@ class BaseModel(torch.nn.Module):
         if verbose:
             LOGGER.info(f"Transferred {len_updated_csd}/{len(self.model.state_dict())} items from pretrained weights")
 
+
     def loss(self, batch, preds=None, return_features=False):
         """
         Compute loss.

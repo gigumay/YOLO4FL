@@ -145,14 +145,8 @@ class Detect(nn.Module):
         )
         self.dfl = DFL(self.reg_max) if self.reg_max > 1 else nn.Identity()
 
-        # Projection head(s) for prototype alignment / contrastive loss (FedProto). Applied to pooled
-        # object / background / prototype features inside the loss, not in forward(), so inference and
-        # export are unaffected. Registered here so the params are tracked by the optimizer, saved in the
-        # checkpoint, and aggregated by FedAvg. "bb" projects the neck features (Detect input channels);
-        # the "head" branch is a hook for the raw detection logits (dim self.no) -- enable when aligning
-        # the head, but prefer tapping penultimate features over final logits.
-        self.proto_proj = nn.ModuleDict({"bb": ProjectionHead(ch[0], out_dim=self.proto_embed_dim)})
-        # self.proto_proj["head"] = ProjectionHead(self.no, out_dim=self.proto_embed_dim)
+        # Projection head for prototype alignment / contrastive loss (FedProto).
+        self.proto_proj = ProjectionHead(ch[0], out_dim=self.proto_embed_dim)
 
         if self.end2end:
             self.one2one_cv2 = copy.deepcopy(self.cv2)

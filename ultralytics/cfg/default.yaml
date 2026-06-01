@@ -132,17 +132,14 @@ align_prototypes: # (bool) whether to enforce alignment with the global prototyp
 use_backgrounds: True # (bool) whether to use background prototypes and background margin loss during training
 bg_ratio: 1.0 # (float) background negatives drawn per image as a multiple of GT object count (1.0 = legacy behavior)
 bg_hard_frac: 1.0 # (float) fraction of drawn negatives taken as hardest; remainder sampled at random (1.0 = legacy behavior)
-ptl_bb: 1.0 # (float) Prototype loss gain for the backbone
-ptl_head: 1.0 # (float) Prototype loss gain for the head
-bgl_bb: 1.0 # (float) Background margin loss gain for the backbone
-bgl_head: 1.0 # (float) Background margin loss gain for the head
+ptl: 1.0 # (float) Prototype alignment loss gain
+bgl: 1.0 # (float) Background margin loss gain for the backbone
+ptcl: 1.0 # (float) Prototype contrastive loss gain
 distance_metric: "l2" # (string) metric used to calculate prototype distance. Alternative is "cosine". 
 single_proto_obj: True # (bool) whether to extract a single object prototype (embedding cluster) 
-align_bb: True # (bool) whether to apply prototype alignment to the backbone.
-align_head: False # (bool) whether to apply prototype alignment to the head.
 project_features: False # (bool) project pooled object/background/prototype features through an MLP head before the prototype loss
-contrastive_proto: False # (bool) use a single prototype-contrastive (InfoNCE) loss in place of separate alignment (ptl) + margin (bgl) losses
-proto_temp: 0.1 # (float) temperature for the prototype-contrastive (InfoNCE) loss
+use_contr_loss: False # (bool) use a single prototype-contrastive (InfoNCE) loss in place of separate alignment (ptl) + margin (bgl) losses
+contr_temp: 0.1 # (float) temperature for the prototype-contrastive (InfoNCE) loss
 features_out_dir: #(str) where to save the features extracted during training.
 
 

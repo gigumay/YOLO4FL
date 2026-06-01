@@ -143,7 +143,7 @@ class BboxLoss(nn.Module):
         return loss_iou, loss_dfl
     
 
-class ObjBgContrastiveLoss(nn.Module):
+class ObjBgMarginLoss(nn.Module):
     """
     Contrastive repulsion loss between object prototypes
     and hard-negative background features.
@@ -181,14 +181,7 @@ class ObjBgContrastiveLoss(nn.Module):
 
 class ProtoContrastiveLoss(nn.Module):
     """
-    Prototype-anchored contrastive (InfoNCE / SupCon-style) loss.
-
-    For each local object embedding, the (frozen) global prototype(s) are the positives and the local
-    hard-negative background embeddings are the negatives. Unlike absolute alignment, this objective is
-    *relative*: it only requires each object to be closer to its prototype than to the backgrounds, so the
-    softmax saturates and the gradient vanishes once that holds -- leaving the features free to vary for
-    detection. This is what makes it less disruptive than pulling features onto a fixed point. Because the
-    positives are frozen and negatives are present, it has no trivial collapse solution (FedPCL-style).
+    Prototype-anchored contrastive loss..
     """
 
     def __init__(self, temperature: float = 0.1):
@@ -198,9 +191,9 @@ class ProtoContrastiveLoss(nn.Module):
     def forward(self, obj_emb: torch.Tensor, proto_emb: torch.Tensor, bg_emb: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            obj_emb (torch.Tensor): object embeddings of shape (N_obj, D).
-            proto_emb (torch.Tensor): global prototype embeddings (positives) of shape (N_proto, D).
-            bg_emb (torch.Tensor): background embeddings (negatives) of shape (N_bg, D) or None.
+            obj_emb (torch.Tensor):         object embeddings of shape (N_obj, D).
+            proto_emb (torch.Tensor):       global prototype embeddings (positives) of shape (N_proto, D).
+            bg_emb (torch.Tensor):          background embeddings (negatives) of shape (N_bg, D) or None.
         Returns:
             scalar loss
         """
@@ -292,11 +285,8 @@ class v8DetectionLoss:
 
         # load global prototypes
         if self.hyp.align_prototypes:
-            self.global_obj_protos = {"bb": torch.load(self.hyp.global_obj_protos["bb"]).to(device).detach() if self.hyp.align_bb else None,
-                                      "head": torch.load(self.hyp.global_obj_protos["head"]).to(device).detach() if self.hyp.align_head else None}
-            for v in self.global_obj_protos.values():
-                if v is not None:
-                    assert len(v.shape) == 2
+            self.global_obj_protos = torch.load(self.hyp.global_obj_protos).to(device).detach()
+            assert len(self.global_obj_protos.shape) == 2, "Global prototypes should be stored as a 2D tensor"
 
         self.stride = m.stride  # model strides
         self.nc = m.nc  # number of classes
@@ -309,40 +299,30 @@ class v8DetectionLoss:
         self.assigner = TaskAlignedAssigner(topk=tal_topk, num_classes=self.nc, alpha=0.5, beta=6.0)
         self.extractor = TALFeatureExtractor(bg_ratio=self.hyp.bg_ratio, hard_frac=self.hyp.bg_hard_frac)
         self.bbox_loss = BboxLoss(m.reg_max).to(device)
-        self.contrastive_loss = ObjBgContrastiveLoss(margin=1.0).to(device) if self.hyp.use_backgrounds else None
-
-        # Prototype-alignment projection head(s), registered on the Detect module so their params are in
-        # the optimizer / checkpoint / FedAvg. When project_features is False, features pass through
-        # unchanged and behavior is identical to the raw-feature alignment.
-        self.proto_proj = m.proto_proj
+        self.margin_loss = ObjBgMarginLoss(margin=1.0).to(device) if self.hyp.use_backgrounds else None
+        self.proto_proj_head = m.proto_proj
         self.project_features = self.hyp.project_features
-        # When True, a single prototype-contrastive (InfoNCE) term replaces the separate ptl + bgl losses.
-        self.contrastive_proto = self.hyp.contrastive_proto
-        self.proto_contrastive_loss = ProtoContrastiveLoss(temperature=self.hyp.proto_temp).to(device)
+        self.use_contr_loss = self.hyp.use_contr_loss
+        self.proto_contrastive_loss = ProtoContrastiveLoss(temperature=self.hyp.contr_temp).to(device)
         self.proj = torch.arange(m.reg_max, dtype=torch.float, device=device)
         self.gain_map = {"box": self.hyp.box,
                          "cls": self.hyp.cls,
                          "dfl": self.hyp.dfl,
-                         "ptl_bb": self.hyp.ptl_bb,
-                         "bgl_bb": self.hyp.bgl_bb,
-                         "ptl_head": self.hyp.ptl_head,
-                         "bgl_head": self.hyp.bgl_head}
-
+                         "ptl": self.hyp.ptl,
+                         "bgl": self.hyp.bgl,
+                         "ptcl": self.hyp.ptcl}
 
 
     def build_loss_layout(self) -> List[str]:
         layout = ["box", "cls", "dfl"]
-        if self.hyp.align_bb:
-            layout.append("ptl_bb")
+        if self.hyp.use_contr_loss:
+            layout.append("ptcl")
+        else:
+            layout.append("ptl")
             if self.hyp.use_backgrounds:
-                layout.append("bgl_bb")
-
-        if self.hyp.align_head:
-            layout.append("ptl_head")
-            if self.hyp.use_backgrounds:
-                layout.append("bgl_head")
-
+                layout.append("bgl")
         return layout
+
 
     def preprocess(self, targets: torch.Tensor, batch_size: int, scale_tensor: torch.Tensor) -> torch.Tensor:
         """Preprocess targets by converting to tensor format and scaling coordinates."""
@@ -361,6 +341,7 @@ class v8DetectionLoss:
             out[..., 1:5] = xywh2xyxy(out[..., 1:5].mul_(scale_tensor))
         return out
 
+
     def bbox_decode(self, anchor_points: torch.Tensor, pred_dist: torch.Tensor) -> torch.Tensor:
         """Decode predicted object bounding box coordinates from anchor points and distribution."""
         if self.use_dfl:
@@ -370,15 +351,16 @@ class v8DetectionLoss:
             # pred_dist = (pred_dist.view(b, a, c // 4, 4).softmax(2) * self.proj.type(pred_dist.dtype).view(1, 1, -1, 1)).sum(2)
         return dist2bbox(pred_dist, anchor_points, xywh=False)
 
-    def _project(self, feats: torch.Tensor, branch: str) -> torch.Tensor:
-        """Project pooled features through the prototype-alignment head for ``branch`` ("bb"/"head").
 
-        Returns the features unchanged when projection is disabled or no head exists for the branch, so
-        the alignment loss stays in raw feature space and behavior matches the pre-projection code path.
+    def _project(self, feats: torch.Tensor) -> torch.Tensor:
+        """Project pooled features through the prototype-alignment.
+
+        Returns the features unchanged when projection is disabled.
         """
-        if feats is None or not self.project_features or branch not in self.proto_proj:
+        if feats is None or not self.project_features:
             return feats
-        return self.proto_proj[branch](feats)
+        return self.proto_proj_head(feats)
+
 
     def __call__(self, preds: Any, embds: list, batch: Dict[str, torch.Tensor], return_features: bool = False) -> Tuple[torch.Tensor, torch.Tensor]:
         """Calculate the sum of the loss for box, cls and dfl multiplied by batch size."""
@@ -436,84 +418,53 @@ class v8DetectionLoss:
             )
 
         """
-        Generate prototypes. Note that align_bb/align_head will have different values during the first round, 
-        where I extract prototypes but don;t align yet. Hence this needs to be checked below.
+        Generate prototypes
         """
         if return_features or self.hyp.align_prototypes:
-            if self.hyp.align_bb: 
-                local_obj_features_bb = self.extractor(embds=embds, fg_mask=fg_mask, target_gt_idx=target_gt_idx)  
+            local_obj_features = self.extractor(embds=embds, fg_mask=fg_mask, target_gt_idx=target_gt_idx)  
 
-                if self.hyp.use_backgrounds:
-                    local_bg_features_bb = self.extractor(embds=embds, fg_mask=fg_mask, target_gt_idx=target_gt_idx,
-                                                          mode="background", pred_scores=pred_scores.detach())
-                else:
-                    local_bg_features_bb = None
-                if self.hyp.align_prototypes:
-                    # This guards against cases where a prootype could not be extracted form the data (not sure why this happens)
-                    if local_obj_features_bb is not None:
-                        assert local_obj_features_bb.shape[-1] != (self.nc + self.reg_max * 4), "Feature MixUp!"
-                        # Project local features and the (raw-space) frozen global prototype through the
-                        # *current* head so both live in the same embedding space at every step.
-                        obj_emb_bb = self._project(local_obj_features_bb, "bb")
-                        bg_emb_bb = self._project(local_bg_features_bb, "bb") if self.hyp.use_backgrounds else None
-                        proto_emb_bb = self._project(self.global_obj_protos["bb"], "bb")
+            if self.hyp.use_backgrounds:
+                local_bg_features = self.extractor(embds=embds, fg_mask=fg_mask, target_gt_idx=target_gt_idx,
+                                                   mode="background", pred_scores=pred_scores.detach())
+            else:
+                local_bg_features = None
 
-                        if self.contrastive_proto:
-                            # Single InfoNCE term replaces ptl + bgl; it occupies the ptl_bb slot (scaled by
-                            # the ptl_bb gain) while the bgl_bb slot stays 0.
-                            loss[loss_idx["ptl_bb"]] = self.proto_contrastive_loss(obj_emb_bb, proto_emb_bb, bg_emb_bb)
-                        else:
-                            obj_distances_bb = compute_dist2global(local_proto=obj_emb_bb,
-                                                                   global_proto=proto_emb_bb,
-                                                                   metric=self.hyp.distance_metric)
-                            assert len(obj_distances_bb.shape) == 1 and obj_distances_bb.shape[0] == obj_emb_bb.shape[0]
-                            loss[loss_idx["ptl_bb"]] = obj_distances_bb.mean()
+            if self.hyp.align_prototypes:
+                # This guards against cases where a prootype could not be extracted form the data (not sure why this happens)
+                if local_obj_features is not None:
+                    assert local_obj_features.shape[-1] != (self.nc + self.reg_max * 4), "Feature MixUp!"
+                    # Project local features and the (raw-space) frozen global prototype
+                    obj_emb = self._project(local_obj_features)
+                    bg_emb = self._project(local_bg_features) if self.hyp.use_backgrounds else None
+                    proto_emb = self._project(self.global_obj_protos)
 
-                            if self.hyp.use_backgrounds:
-                                loss[loss_idx["bgl_bb"]] = self.contrastive_loss(obj_emb_bb, bg_emb_bb)
-
+                    if self.use_contr_loss:
+                        loss[loss_idx["ptcl"]] = self.proto_contrastive_loss(obj_emb, proto_emb, bg_emb)
                     else:
-                        loss[loss_idx["ptl_bb"]] = 0.0
+                        obj_distances_bb = compute_dist2global(local_proto=obj_emb,
+                                                                global_proto=proto_emb,
+                                                                metric=self.hyp.distance_metric)
+                        assert len(obj_distances_bb.shape) == 1 and obj_distances_bb.shape[0] == obj_emb.shape[0]
+                        loss[loss_idx["ptl"]] = obj_distances_bb.mean()
+
                         if self.hyp.use_backgrounds:
-                            loss[loss_idx["bgl_bb"]] = 0.0
-        
-            if self.hyp.align_head:
-                local_obj_features_head = self.extractor(embds=preds, fg_mask=fg_mask, target_gt_idx=target_gt_idx)
-                
-                if self.hyp.use_backgrounds:
-                    local_bg_features_head = self.extractor(embds=preds, fg_mask=fg_mask, target_gt_idx=target_gt_idx,
-                                                            mode="background", pred_scores=pred_scores.detach())
+                            loss[loss_idx["bgl"]] = self.margin_loss(obj_emb, bg_emb)
                 else:
-                    local_bg_features_head = None
-                if self.hyp.align_prototypes:
-                    # This guards against cases where a prootype could not be extracted form the data (not sure why this happens)
-                    # NOTE: head path is the projection/contrastive hook -- to enable, build self.proto_proj["head"]
-                    # in Detect and mirror the projected bb block above (project obj/bg/proto, branch="head").
-                    if local_obj_features_head is not None:
-                        assert local_obj_features_head.shape[-1] == (self.nc + self.reg_max * 4), "Feature MixUp!"
-                        obj_distances_head = compute_dist2global(local_proto=local_obj_features_head,
-                                                                 global_proto=self.global_obj_protos["head"], 
-                                                                 metric=self.hyp.distance_metric)
-                        assert len(obj_distances_head.shape) == 1 and obj_distances_head.shape[0] == local_obj_features_head.shape[0]
-                        loss[loss_idx["ptl_head"]] = obj_distances_head.mean()
-
-                        if self.hyp.use_backgrounds:
-                            loss[loss_idx["bgl_head"]] = self.contrastive_loss(local_obj_features_head, local_bg_features_head)
-
+                    if self.use_contr_loss:
+                        loss[loss_idx["ptcl"]] = 0.0
                     else:
-                        loss[loss_idx["ptl_head"]] = 0.0
+                        loss[loss_idx["ptl"]] = 0.0
                         if self.hyp.use_backgrounds:
-                            loss[loss_idx["bgl_head"]] = 0.0
-                
-            features = {"bb": local_obj_features_bb if self.hyp.align_bb else None, "head": local_obj_features_head if self.hyp.align_head else None}
+                            loss[loss_idx["bgl"]] = 0.0
+            
+            features = local_obj_features
         else:
-            features = {"bb": None, "head": None}
+            features = None
     
         for name, idx in loss_idx.items():
             loss[idx] *= self.gain_map[name]
             
-        return loss * batch_size, loss.detach(), features  # loss(box, cls, dfl, ptl_bb, ptl_head)
-
+        return loss * batch_size, loss.detach(), features 
 
 
 class v8SegmentationLoss(v8DetectionLoss):
