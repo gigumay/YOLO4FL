@@ -378,7 +378,6 @@ class v8DetectionLoss:
         if return_features or self.hyp.align_prototypes:
             if self.hyp.align_bb: 
                 local_obj_features_bb = self.extractor(embds=embds, fg_mask=fg_mask, target_gt_idx=target_gt_idx)  
-                assert local_obj_features_bb.shape[-1] != (self.nc + self.reg_max * 4), "Feature MixUp!"
 
                 if self.hyp.use_backgrounds:
                     local_bg_features_bb = self.extractor(embds=embds, fg_mask=fg_mask, target_gt_idx=target_gt_idx,
@@ -388,6 +387,7 @@ class v8DetectionLoss:
                 if self.hyp.align_prototypes:
                     # This guards against cases where a prootype could not be extracted form the data (not sure why this happens)
                     if local_obj_features_bb is not None:
+                        assert local_obj_features_bb.shape[-1] != (self.nc + self.reg_max * 4), "Feature MixUp!"
                         obj_distances_bb = compute_dist2global(local_proto=local_obj_features_bb, 
                                                                global_proto=self.global_obj_protos["bb"], 
                                                                metric=self.hyp.distance_metric)
@@ -404,7 +404,6 @@ class v8DetectionLoss:
         
             if self.hyp.align_head:
                 local_obj_features_head = self.extractor(embds=preds, fg_mask=fg_mask, target_gt_idx=target_gt_idx)
-                assert local_obj_features_bb.shape[-1] != (self.nc + self.reg_max * 4), "Feature MixUp!"
                 
                 if self.hyp.use_backgrounds:
                     local_bg_features_head = self.extractor(embds=preds, fg_mask=fg_mask, target_gt_idx=target_gt_idx,
@@ -414,6 +413,7 @@ class v8DetectionLoss:
                 if self.hyp.align_prototypes:
                     # This guards against cases where a prootype could not be extracted form the data (not sure why this happens)
                     if local_obj_features_head is not None:
+                        assert local_obj_features_bb.shape[-1] != (self.nc + self.reg_max * 4), "Feature MixUp!"
                         obj_distances_head = compute_dist2global(local_proto=local_obj_features_head, 
                                                                  global_proto=self.global_obj_protos["head"], 
                                                                  metric=self.hyp.distance_metric)
