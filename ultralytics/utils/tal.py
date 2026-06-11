@@ -381,12 +381,15 @@ class TALFeatureExtractor(nn.Module):
         hard_frac (float): Fraction of the drawn negatives taken as the hardest (highest predicted
             confidence); the remainder are sampled at random for broader coverage. hard_frac=1.0 takes
             only the hardest negatives (legacy behavior).
+        pool_foreground (bool): If True (default), anchors assigned to the same GT are mean-pooled into a
+            single object prototype. If False, each positive anchor's feature is kept separately.
     """
 
-    def __init__(self, bg_ratio: float = 1.0, hard_frac: float = 1.0):
+    def __init__(self, bg_ratio: float = 1.0, hard_frac: float = 1.0, pool_foreground: bool = True):
         super().__init__()
         self.bg_ratio = bg_ratio
         self.hard_frac = hard_frac
+        self.pool_foreground = pool_foreground
 
     def forward(self, embds: list, fg_mask: torch.Tensor, target_gt_idx: torch.Tensor = None, pred_scores: torch.Tensor = None,
                 mode: str = "foreground") -> torch.Tensor:
@@ -418,12 +421,16 @@ class TALFeatureExtractor(nn.Module):
                 gt_idx = target_gt_idx[b, pos_idx]      # (P,)
                 feats_pos = all_feats[b, :, pos_idx]    # (C, P)
 
-                for g in gt_idx.unique():
-                    sel_mask = gt_idx == g
-                    sel_feats = feats_pos[:, sel_mask]  # (C, K)
-                    # mean pool anchors assigned to same GT
-                    obj_proto = sel_feats.mean(dim=1)
-                    out_features.append(obj_proto)
+                if self.pool_foreground:
+                    for g in gt_idx.unique():
+                        sel_mask = gt_idx == g
+                        sel_feats = feats_pos[:, sel_mask]  # (C, K)
+                        # mean pool anchors assigned to same GT
+                        obj_proto = sel_feats.mean(dim=1)
+                        out_features.append(obj_proto)
+                else:
+                    # keep each positive anchor's feature separately
+                    out_features.extend(feats_pos.T)
             
             elif mode == "background":
 

@@ -632,6 +632,9 @@ class Model(torch.nn.Module):
         validator = (validator or self._smart_load("validator"))(args=args, _callbacks=self.callbacks)
         validator(model=self.model)
         self.metrics = validator.metrics
+        if args.get("return_features_val"):
+            self.features = getattr(validator, "features", None)
+            return validator.metrics, self.features
         return validator.metrics
 
     def benchmark(self, data=None, format="", verbose=False, **kwargs: Any):

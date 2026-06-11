@@ -140,6 +140,8 @@ class BaseValidator:
         """
         self.training = trainer is not None
         augment = self.args.augment and (not self.training)
+        assert not (self.args.return_features_val and augment), \
+            "return_features_val=True is incompatible with augment=True (augmented val cannot return embeddings)"
         if self.training:
             self.device = trainer.device
             self.data = trainer.data
@@ -198,6 +200,9 @@ class BaseValidator:
         bar = TQDM(self.dataloader, desc=self.get_desc(), total=len(self.dataloader))
         self.init_metrics(de_parallel(model))
         self.jdict = []  # empty before each val
+        # TAL object features (detection only); AutoBackend (standalone val) exposes the loss-capable model as .model
+        self.features = [] if self.args.return_features_val else None
+        loss_model = model if hasattr(model, "loss") else getattr(model, "model", model)
         for batch_i, batch in enumerate(bar):
             self.run_callbacks("on_val_batch_start")
             self.batch_i = batch_i
@@ -207,11 +212,32 @@ class BaseValidator:
 
             # Inference
             with dt[1]:
-                preds = model(batch["img"], augment=augment)
+                if self.args.return_features_val and not augment:
+                    # single forward yields decoded preds + intermediate embeddings + raw head feats
+                    out = model(batch["img"], embed=[16, 19, 22, 23], return_all_preds=True)
+                    assert len(out[1]) == 4, "expected embeddings from layers [16, 19, 22, 23]"
+                    embds = out[1][:3]            # layers 16, 19, 22 -> feature maps for the extractor
+                    preds = (out[0], out[1][-1])  # (decoded preds, raw head feats) == normal eval output
+                else:
+                    embds = None
+                    preds = model(batch["img"], augment=augment)
 
             # Loss
             with dt[2]:
-                if self.training:
+                if embds is not None and hasattr(loss_model, "loss"):
+                    # call the criterion directly with the precomputed embeddings (no second forward).
+                    # `preds` is unchanged from inference, so the postprocess/metrics path is unaffected.
+                    if getattr(loss_model, "criterion", None) is None:
+                        # a model loaded for standalone val carries only a minimal args dict; the criterion
+                        # needs the full hyperparameter set, so build it from the validator's own config.
+                        loss_model.args = self.args
+                        loss_model.criterion = loss_model.init_criterion()
+                    out = loss_model.criterion(preds, embds, batch, return_features=True)
+                    if self.training:
+                        self.loss += out[1]
+                    if out[2] is not None:
+                        self.features.append(out[2].detach().cpu())
+                elif self.training:
                     self.loss += model.loss(batch, preds)[1]
 
             # Postprocess
@@ -224,6 +250,12 @@ class BaseValidator:
                 self.plot_predictions(batch, preds, batch_i)
 
             self.run_callbacks("on_val_batch_end")
+        # after the loop: merge per-batch features into one tensor and save a single file
+        if self.features is not None and len(self.features):
+            self.features = torch.cat(self.features, dim=0)
+            if self.args.features_out_dir_val:
+                Path(self.args.features_out_dir_val).mkdir(parents=True, exist_ok=True)
+                torch.save(self.features, f"{self.args.features_out_dir_val}/features_val.pt")
         stats = self.get_stats()
         self.speed = dict(zip(self.speed.keys(), (x.t / len(self.dataloader.dataset) * 1e3 for x in dt)))
         self.finalize_metrics()

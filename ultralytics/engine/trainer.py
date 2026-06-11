@@ -367,7 +367,7 @@ class BaseTrainer:
 
         # save
         all_features = torch.cat(all_features, dim=0)
-        torch.save(all_features, f"{self.args.features_out_dir}/features.pt")
+        torch.save(all_features, f"{self.args.features_out_dir_train}/features.pt")
 
         return all_features
 
