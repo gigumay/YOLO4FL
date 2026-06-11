@@ -200,8 +200,10 @@ class BaseValidator:
         bar = TQDM(self.dataloader, desc=self.get_desc(), total=len(self.dataloader))
         self.init_metrics(de_parallel(model))
         self.jdict = []  # empty before each val
-        # TAL object features (detection only); AutoBackend (standalone val) exposes the loss-capable model as .model
+        # TAL features (detection only); AutoBackend (standalone val) exposes the loss-capable model as .model.
+        # background features are only produced by the criterion when use_backgrounds is set.
         self.features = [] if self.args.return_features_val else None
+        self.bg_features = [] if self.args.return_features_val else None
         loss_model = model if hasattr(model, "loss") else getattr(model, "model", model)
         for batch_i, batch in enumerate(bar):
             self.run_callbacks("on_val_batch_start")
@@ -225,11 +227,11 @@ class BaseValidator:
             # Loss
             with dt[2]:
                 if embds is not None and hasattr(loss_model, "loss"):
-                    # call the criterion directly with the precomputed embeddings (no second forward).
-                    # `preds` is unchanged from inference, so the postprocess/metrics path is unaffected.
                     if getattr(loss_model, "criterion", None) is None:
-                        # a model loaded for standalone val carries only a minimal args dict; the criterion
-                        # needs the full hyperparameter set, so build it from the validator's own config.
+                        """
+                        a model loaded for standalone val carries only a minimal args dict; the criterion
+                        needs the full hyperparameter set, so build it from the validator's own config.
+                        """
                         loss_model.args = self.args
                         loss_model.criterion = loss_model.init_criterion()
                     out = loss_model.criterion(preds, embds, batch, return_features=True)
@@ -237,6 +239,8 @@ class BaseValidator:
                         self.loss += out[1]
                     if out[2] is not None:
                         self.features.append(out[2].detach().cpu())
+                    if out[3] is not None:
+                        self.bg_features.append(out[3].detach().cpu())
                 elif self.training:
                     self.loss += model.loss(batch, preds)[1]
 
@@ -250,12 +254,17 @@ class BaseValidator:
                 self.plot_predictions(batch, preds, batch_i)
 
             self.run_callbacks("on_val_batch_end")
-        # after the loop: merge per-batch features into one tensor and save a single file
-        if self.features is not None and len(self.features):
-            self.features = torch.cat(self.features, dim=0)
+
+        # merge per-batch features into one tensor each (None if nothing was collected) and save single files
+        if self.features is not None:
+            self.features = torch.cat(self.features, dim=0) if len(self.features) else None
+            self.bg_features = torch.cat(self.bg_features, dim=0) if len(self.bg_features) else None
             if self.args.features_out_dir_val:
                 Path(self.args.features_out_dir_val).mkdir(parents=True, exist_ok=True)
-                torch.save(self.features, f"{self.args.features_out_dir_val}/features_val.pt")
+                if self.features is not None:
+                    torch.save(self.features, f"{self.args.features_out_dir_val}/features_val.pt")
+                if self.bg_features is not None:
+                    torch.save(self.bg_features, f"{self.args.features_out_dir_val}/bg_features_val.pt")
         stats = self.get_stats()
         self.speed = dict(zip(self.speed.keys(), (x.t / len(self.dataloader.dataset) * 1e3 for x in dt)))
         self.finalize_metrics()

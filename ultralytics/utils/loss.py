@@ -460,13 +460,15 @@ class v8DetectionLoss:
                             loss[loss_idx["bgl"]] = 0.0
             
             features = local_obj_features
+            bg_features = local_bg_features
         else:
             features = None
-    
+            bg_features = None
+
         for name, idx in loss_idx.items():
             loss[idx] *= self.gain_map[name]
-            
-        return loss * batch_size, loss.detach(), features 
+
+        return loss * batch_size, loss.detach(), features, bg_features
 
 
 class v8SegmentationLoss(v8DetectionLoss):

@@ -355,7 +355,7 @@ class BaseTrainer:
             for i, batch in enumerate(pbar):
                 with autocast(self.amp):
                     batch = self.preprocess_batch(batch)
-                    _, _, features = model(batch, return_features=True)
+                    _, _, features, _ = model(batch, return_features=True)
 
                     if features is None:
                         continue  # skip if no features extracted (e.g., no foreground objects)
@@ -434,7 +434,7 @@ class BaseTrainer:
                 with autocast(self.amp):
                     batch = self.preprocess_batch(batch)
                     if self.args.task == "detect":
-                        loss, self.loss_items, _ = self.model(batch)
+                        loss, self.loss_items, _, _ = self.model(batch)
                     else:
                         loss, self.loss_items = self.model(batch)
                     
