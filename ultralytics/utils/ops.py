@@ -80,16 +80,62 @@ class Profile(contextlib.ContextDecorator):
         return time.perf_counter()
 
     
+def compute_mmd2(local_feats: torch.Tensor, global_feats: torch.Tensor, normalize: bool = True,
+                 max_targets: int = 1024):
+    """
+    Differentiable squared Maximum Mean Discrepancy (Gaussian kernel, median-heuristic bandwidth)
+    between the local features and a random subsample of the global target features. Two-sided:
+    the kxx self-similarity term penalizes feature collapse, unlike nearest-target distances.
+    Args:
+        local_feats (torch.Tensor):   local features with shape (n_local, C), gradients flow.
+        global_feats (torch.Tensor):  target features with shape (n_global, C), treated as constants.
+        normalize (bool):             L2-normalize both sides (directional MMD) before the kernel.
+        max_targets (int):            per-call random subsample size of the targets.
+    Returns:
+        mmd2 (torch.Tensor):    scalar squared-MMD estimate (>= 0 up to estimator noise).
+    """
+    if local_feats.shape[0] < 2:
+        return local_feats.sum() * 0.0
+
+    global_feats = global_feats.detach()
+    if global_feats.shape[0] > max_targets:
+        idx = torch.randint(0, global_feats.shape[0], (max_targets,), device=global_feats.device)
+        global_feats = global_feats[idx]
+
+    if normalize:
+        x = torch.nn.functional.normalize(local_feats, p=2, dim=1)
+        y = torch.nn.functional.normalize(global_feats, p=2, dim=1)
+    else:
+        x, y = local_feats, global_feats
+
+    z = torch.cat([x, y], dim=0)
+    d2 = torch.cdist(z, z, p=2).pow(2)
+    with torch.no_grad():
+        bandwidth = d2[d2 > 0].median().clamp(min=1e-6)
+    k = torch.exp(-d2 / bandwidth)
+
+    n, m = x.shape[0], y.shape[0]
+    kxx = (k[:n, :n].sum() - k[:n, :n].diagonal().sum()) / (n * (n - 1))
+    kyy = (k[n:, n:].sum() - k[n:, n:].diagonal().sum()) / (m * (m - 1))
+    kxy = k[:n, n:].mean()
+    return kxx + kyy - 2 * kxy
+
+
 def compute_dist2global(local_proto: torch.Tensor, global_proto: torch.Tensor, metric: str):
     """"
     Compute closest global prototype for each local prototype and return the corresponding distances.
     Args:
         local_proto (torch.Tensor):   Local prototypes with shape (n_local, C).
         global_proto (torch.Tensor):  Global prototypes with shape (n_global, C).
-        metric (str):                 Distance metric to use ("l2" or "cosine").  # <<< ADDED
+        metric (str):                 Distance metric to use ("l2", "cosine" or "l2_raw").  # <<< ADDED
     Returns:
         distances (torch.Tensor):   Distances to closest global prototypes with shape (n_local,).
     """
+    if metric == "l2_raw":
+        # unnormalized L2: aligns feature direction AND magnitude
+        dist_matrix = torch.cdist(local_proto, global_proto, p=2)
+        return dist_matrix.min(dim=1).values
+
     local_norm = torch.nn.functional.normalize(local_proto, p=2, dim=1)
     global_norm = torch.nn.functional.normalize(global_proto, p=2, dim=1)
     if metric == "cosine":

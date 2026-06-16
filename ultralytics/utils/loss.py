@@ -11,7 +11,7 @@ from typing import Union
 from collections import OrderedDict
 
 from ultralytics.utils.metrics import OKS_SIGMA
-from ultralytics.utils.ops import crop_mask, xywh2xyxy, xyxy2xywh, compute_dist2global
+from ultralytics.utils.ops import crop_mask, xywh2xyxy, xyxy2xywh, compute_dist2global, compute_mmd2
 from ultralytics.utils.tal import RotatedTaskAlignedAssigner, TaskAlignedAssigner, TALFeatureExtractor, dist2bbox, dist2rbox, make_anchors
 from ultralytics.utils.torch_utils import autocast
 
@@ -281,7 +281,7 @@ class v8DetectionLoss:
         m = model.model[-1]  # Detect() module
         self.bce = nn.BCEWithLogitsLoss(reduction="none")
         self.hyp = h
-        assert self.hyp.distance_metric in ["l2", "cosine"], "Invalid distance metric!"
+        assert self.hyp.distance_metric in ["l2", "cosine", "l2_raw", "mmd", "mmd_raw"], "Invalid distance metric!"
 
         # load global prototypes
         if self.hyp.align_prototypes:
@@ -442,6 +442,10 @@ class v8DetectionLoss:
 
                     if self.use_contr_loss:
                         loss[loss_idx["ptcl"]] = self.proto_contrastive_loss(obj_emb, proto_emb, bg_emb)
+                    elif self.hyp.distance_metric in ("mmd", "mmd_raw"):
+                        # two-sided distribution alignment with the target set (kxx penalizes collapse)
+                        loss[loss_idx["ptl"]] = compute_mmd2(local_feats=obj_emb, global_feats=proto_emb,
+                                                             normalize=self.hyp.distance_metric == "mmd")
                     else:
                         obj_distances_bb = compute_dist2global(local_proto=obj_emb,
                                                                 global_proto=proto_emb,

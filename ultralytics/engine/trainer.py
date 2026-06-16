@@ -530,8 +530,9 @@ class BaseTrainer:
             seconds = time.time() - self.train_time_start
             LOGGER.info(f"\n{epoch - self.start_epoch + 1} epochs completed in {seconds / 3600:.3f} hours.")
             
-            # collect training set features
-            self._collect_features()
+            # collect training set features (only when an output location is configured)
+            if self.args.features_out_dir_train:
+                self._collect_features()
 
             self.final_eval(strip_last=False)
             if self.args.plots:
