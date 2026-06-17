@@ -70,7 +70,7 @@ return_all_preds: False # (bool) if True all predictions as generated before pre
 return_features_val: False # (bool) collect TAL object features during validation
 
 # Inference + Training shared settings ---------------------------------------------------------------------------------------------------
-global_obj_protos:  # (dict) dictionary containing paths to the global object prototype files (.pt) for the backbone and head
+global_obj_protos:  # (str) path to the global object prototype file (.pt)
 
 # Visualize settings ---------------------------------------------------------------------------------------------------
 show: False # (bool) show predicted images and videos if environment allows
@@ -130,18 +130,18 @@ erasing: 0.4 # (float) probability of random erasing during classification train
 
 # Prototype Regularization ---------------------------------------------------------------------------------------------
 align_prototypes: # (bool) whether to enforce alignment with the global prototype during training 
-use_backgrounds: True # (bool) whether to use background prototypes and background margin loss during training
-bg_ratio: 1.0 # (float) background negatives drawn per image as a multiple of GT object count (1.0 = legacy behavior)
-bg_hard_frac: 1.0 # (float) fraction of drawn negatives taken as hardest; remainder sampled at random (1.0 = legacy behavior)
-pool_foreground: True # (bool) mean-pool anchors assigned to the same GT into one prototype (False = keep per-anchor features)
-ptl: 1.0 # (float) Prototype alignment loss gain
-bgl: 1.0 # (float) Background margin loss gain for the backbone
-ptcl: 1.0 # (float) Prototype contrastive loss gain
-distance_metric: "l2" # (string) metric used to calculate prototype distance. Alternative is "cosine". 
-single_proto_obj: True # (bool) whether to extract a single object prototype (embedding cluster) 
-project_features: False # (bool) project pooled object/background/prototype features through an MLP head before the prototype loss
-use_contr_loss: False # (bool) use a single prototype-contrastive (InfoNCE) loss in place of separate alignment (ptl) + margin (bgl) losses
-contr_temp: 0.1 # (float) temperature for the prototype-contrastive (InfoNCE) loss
+use_backgrounds:  # (bool) whether to use background prototypes and background margin loss during training
+bg_ratio: # (float) background negatives drawn per image as a multiple of GT object count (1.0 = legacy behavior)
+bg_hard_frac: # (float) fraction of drawn negatives taken as hardest; remainder sampled at random (1.0 = legacy behavior)
+pool_foreground: # (bool) mean-pool anchors assigned to the same GT into one prototype (False = keep per-anchor features)
+ptl:  # (float) Prototype alignment loss gain
+bgl:  # (float) Background margin loss gain for the backbone
+ptcl:  # (float) Prototype contrastive loss gain
+distance_metric: # (string) metric used to calculate prototype distance. Alternative is "cosine". 
+single_proto_obj: # (bool) whether to extract a single object prototype (embedding cluster) 
+project_features:  # (bool) project pooled object/background/prototype features through an MLP head before the prototype loss
+use_contr_loss:  # (bool) use a single prototype-contrastive (InfoNCE) loss in place of separate alignment (ptl) + margin (bgl) losses
+contr_temp: # (float) temperature for the prototype-contrastive (InfoNCE) loss
 features_out_dir_train: #(str) where to save the features extracted during training.
 features_out_dir_val: #(str) where to save the features extracted during validation (None = do not write to file).
 

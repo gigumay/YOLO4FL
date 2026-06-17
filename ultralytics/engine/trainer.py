@@ -531,7 +531,7 @@ class BaseTrainer:
             LOGGER.info(f"\n{epoch - self.start_epoch + 1} epochs completed in {seconds / 3600:.3f} hours.")
             
             # collect training set features (only when an output location is configured)
-            if self.args.features_out_dir_train:
+            if self.args.features_out_dir_train and self.args.align_prototypes:
                 self._collect_features()
 
             self.final_eval(strip_last=False)
@@ -803,7 +803,13 @@ class BaseTrainer:
                     "agg_period",
                     "ptl",
                     "bgl",
+                    "ptcl",
+                    "contr_temp",
                     "align_prototypes",
+                    "data",
+                    "global_obj_protos",
+                    "features_out_dir_train",
+                    "features_out_dir_val",
                     "imgsz",
                     "batch",
                     "device",

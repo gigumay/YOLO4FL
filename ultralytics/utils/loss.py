@@ -281,12 +281,12 @@ class v8DetectionLoss:
         m = model.model[-1]  # Detect() module
         self.bce = nn.BCEWithLogitsLoss(reduction="none")
         self.hyp = h
-        assert self.hyp.distance_metric in ["l2", "cosine", "l2_raw", "mmd", "mmd_raw"], "Invalid distance metric!"
 
         # load global prototypes
         if self.hyp.align_prototypes:
             self.global_obj_protos = torch.load(self.hyp.global_obj_protos).to(device).detach()
             assert len(self.global_obj_protos.shape) == 2, "Global prototypes should be stored as a 2D tensor"
+            assert self.hyp.distance_metric in ["l2", "cosine", "l2_raw", "mmd", "mmd_raw"], "Invalid distance metric!"
 
         self.stride = m.stride  # model strides
         self.nc = m.nc  # number of classes
@@ -298,7 +298,7 @@ class v8DetectionLoss:
 
         self.assigner = TaskAlignedAssigner(topk=tal_topk, num_classes=self.nc, alpha=0.5, beta=6.0)
         self.extractor = TALFeatureExtractor(bg_ratio=self.hyp.bg_ratio, hard_frac=self.hyp.bg_hard_frac,
-                                             pool_foreground=self.hyp.pool_foreground)
+                                             pool_foreground=self.hyp.pool_foreground) if self.hyp.align_prototypes else None
         self.bbox_loss = BboxLoss(m.reg_max).to(device)
         self.margin_loss = ObjBgMarginLoss(margin=1.0).to(device) if self.hyp.use_backgrounds else None
         self.proto_proj_head = m.proto_proj
@@ -316,12 +316,13 @@ class v8DetectionLoss:
 
     def build_loss_layout(self) -> List[str]:
         layout = ["box", "cls", "dfl"]
-        if self.hyp.use_contr_loss:
-            layout.append("ptcl")
-        else:
-            layout.append("ptl")
-            if self.hyp.use_backgrounds:
-                layout.append("bgl")
+        if self.hyp.align_prototypes:
+            if self.hyp.use_contr_loss:
+                layout.append("ptcl")
+            else:
+                layout.append("ptl")
+                if self.hyp.use_backgrounds:
+                    layout.append("bgl")
         return layout
 
 
