@@ -143,42 +143,6 @@ class BboxLoss(nn.Module):
         return loss_iou, loss_dfl
     
 
-class ObjBgMarginLoss(nn.Module):
-    """
-    Contrastive repulsion loss between object prototypes
-    and hard-negative background features.
-    """
-
-    def __init__(self, margin: float = 1.0,):
-        super().__init__()
-        self.margin = margin
-
-
-    def forward(self, obj_feats: torch.Tensor, bg_feats: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            obj_feats (torch.Tensor): object features of shape (N_obj, C)
-            bg_feats (torch.Tensor): background features of shape(N_bg, C)
-        Returns:
-            scalar loss
-        """
-        # empty case guard
-        if obj_feats.numel() == 0 or bg_feats.numel() == 0:
-            return torch.tensor(0.0, device=obj_feats.device)
-
-
-        obj_feats_norm = F.normalize(obj_feats, p=2, dim=1)
-        bg_feats_norm = F.normalize(bg_feats, p=2, dim=1)
-
-        # Pairwise L2 distance (N_obj, N_bg)
-        dists = torch.cdist(obj_feats_norm, bg_feats_norm ,p=2)
-
-        # margin loss
-        loss = F.relu(self.margin - dists).pow(2)
-
-        return loss.mean()
-
-
 class ProtoContrastiveLoss(nn.Module):
     """
     Prototype-anchored contrastive loss..
@@ -286,7 +250,12 @@ class v8DetectionLoss:
         if self.hyp.align_prototypes:
             self.global_obj_protos = torch.load(self.hyp.global_obj_protos).to(device).detach()
             assert len(self.global_obj_protos.shape) == 2, "Global prototypes should be stored as a 2D tensor"
-            assert self.hyp.distance_metric in ["l2", "cosine", "l2_raw", "mmd", "mmd_raw"], "Invalid distance metric!"
+            """
+            distance_metric only governs the alignment path (use_backgrounds=False); the contrastive
+            path operates in cosine space and ignores it.
+            """
+            if not self.hyp.use_backgrounds:
+                assert self.hyp.distance_metric in ["l2", "cosine", "l2_raw", "mmd", "mmd_raw"], "Invalid distance metric!"
 
         self.stride = m.stride  # model strides
         self.nc = m.nc  # number of classes
@@ -300,29 +269,22 @@ class v8DetectionLoss:
         self.extractor = TALFeatureExtractor(bg_ratio=self.hyp.bg_ratio, hard_frac=self.hyp.bg_hard_frac,
                                              pool_foreground=self.hyp.pool_foreground)
         self.bbox_loss = BboxLoss(m.reg_max).to(device)
-        self.margin_loss = ObjBgMarginLoss(margin=1.0).to(device) if self.hyp.use_backgrounds else None
         self.proto_proj_head = m.proto_proj
         self.project_features = self.hyp.project_features
-        self.use_contr_loss = self.hyp.use_contr_loss
-        self.proto_contrastive_loss = ProtoContrastiveLoss(temperature=self.hyp.contr_temp).to(device)
+        self.proto_contrastive_loss = ProtoContrastiveLoss(temperature=self.hyp.contr_temp).to(device) if self.hyp.use_backgrounds else None
         self.proj = torch.arange(m.reg_max, dtype=torch.float, device=device)
         self.gain_map = {"box": self.hyp.box,
                          "cls": self.hyp.cls,
                          "dfl": self.hyp.dfl,
                          "ptl": self.hyp.ptl,
-                         "bgl": self.hyp.bgl,
                          "ptcl": self.hyp.ptcl}
 
 
     def build_loss_layout(self) -> List[str]:
         layout = ["box", "cls", "dfl"]
         if self.hyp.align_prototypes:
-            if self.hyp.use_contr_loss:
-                layout.append("ptcl")
-            else:
-                layout.append("ptl")
-                if self.hyp.use_backgrounds:
-                    layout.append("bgl")
+            # use_backgrounds selects the contrastive (ptcl) loss; otherwise plain prototype alignment (ptl)
+            layout.append("ptcl" if self.hyp.use_backgrounds else "ptl")
         return layout
 
 
@@ -441,7 +403,8 @@ class v8DetectionLoss:
                     # Detach so the prototype is a pure (fixed) target in the current embedding space
                     proto_emb = self._project(self.global_obj_protos).detach()
 
-                    if self.use_contr_loss:
+                    if self.hyp.use_backgrounds:
+                        # contrastive loss: backgrounds are the negatives (cosine space)
                         loss[loss_idx["ptcl"]] = self.proto_contrastive_loss(obj_emb, proto_emb, bg_emb)
                     elif self.hyp.distance_metric in ("mmd", "mmd_raw"):
                         # two-sided distribution alignment with the target set (kxx penalizes collapse)
@@ -453,9 +416,6 @@ class v8DetectionLoss:
                                                                 metric=self.hyp.distance_metric)
                         assert len(obj_distances_bb.shape) == 1 and obj_distances_bb.shape[0] == obj_emb.shape[0]
                         loss[loss_idx["ptl"]] = obj_distances_bb.mean()
-
-                        if self.hyp.use_backgrounds:
-                            loss[loss_idx["bgl"]] = self.margin_loss(obj_emb, bg_emb)
             
             features = local_obj_features
             bg_features = local_bg_features

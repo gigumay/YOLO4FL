@@ -802,7 +802,6 @@ class BaseTrainer:
                 for k in (
                     "agg_period",
                     "ptl",
-                    "bgl",
                     "ptcl",
                     "contr_temp",
                     "align_prototypes",

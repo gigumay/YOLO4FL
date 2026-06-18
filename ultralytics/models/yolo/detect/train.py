@@ -149,12 +149,8 @@ class DetectionTrainer(BaseTrainer):
         self.loss_names = ["box_loss", "cls_loss", "dfl_loss"]
 
         if self.args.align_prototypes:
-            if not self.args.use_contr_loss:
-                self.loss_names.append("ptl")
-                if self.args.use_backgrounds:
-                    self.loss_names.append("bgl")
-            else:
-                self.loss_names.append("ptcl")
+            # use_backgrounds selects the contrastive (ptcl) loss; otherwise plain prototype alignment (ptl)
+            self.loss_names.append("ptcl" if self.args.use_backgrounds else "ptl")
 
 
         self.loss_names = tuple(self.loss_names)
