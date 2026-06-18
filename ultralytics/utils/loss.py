@@ -282,7 +282,7 @@ class v8DetectionLoss:
 
     def build_loss_layout(self) -> List[str]:
         layout = ["box", "cls", "dfl"]
-        if self.hyp.align_prototypes:
+        if self.hyp.use_prototypes:
             # use_backgrounds selects the contrastive (ptcl) loss; otherwise plain prototype alignment (ptl)
             layout.append("ptcl" if self.hyp.use_backgrounds else "ptl")
         return layout
@@ -394,7 +394,7 @@ class v8DetectionLoss:
                 local_bg_features = None
 
             if self.hyp.align_prototypes:
-                # This guards against cases where a prootype could not be extracted form the data (not sure why this happens)
+                # This guards against cases where a prootype could not be extracted form the data
                 if local_obj_features is not None:
                     assert local_obj_features.shape[-1] != (self.nc + self.reg_max * 4), "Feature MixUp!"
                     # Project local features and the (raw-space) frozen global prototype

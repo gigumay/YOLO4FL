@@ -129,6 +129,7 @@ erasing: 0.4 # (float) probability of random erasing during classification train
 
 
 # Prototype Regularization ---------------------------------------------------------------------------------------------
+use_prototypes: # (bool) whether to use prototypes for regularization during training
 align_prototypes: # (bool) whether to enforce alignment with the global prototype during training
 use_backgrounds:  # (bool) True -> prototype-contrastive (InfoNCE, ptcl) loss with backgrounds as negatives; False -> alignment-only (ptl) loss
 bg_ratio: # (float) background negatives drawn per image as a multiple of GT object count (1.0 = legacy behavior)

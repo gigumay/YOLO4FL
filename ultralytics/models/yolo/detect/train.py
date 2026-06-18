@@ -148,7 +148,7 @@ class DetectionTrainer(BaseTrainer):
         """Return a DetectionValidator for YOLO model validation."""
         self.loss_names = ["box_loss", "cls_loss", "dfl_loss"]
 
-        if self.args.align_prototypes:
+        if self.args.use_prototypes:
             # use_backgrounds selects the contrastive (ptcl) loss; otherwise plain prototype alignment (ptl)
             self.loss_names.append("ptcl" if self.args.use_backgrounds else "ptl")
 
