@@ -298,7 +298,7 @@ class v8DetectionLoss:
 
         self.assigner = TaskAlignedAssigner(topk=tal_topk, num_classes=self.nc, alpha=0.5, beta=6.0)
         self.extractor = TALFeatureExtractor(bg_ratio=self.hyp.bg_ratio, hard_frac=self.hyp.bg_hard_frac,
-                                             pool_foreground=self.hyp.pool_foreground) if self.hyp.align_prototypes else None
+                                             pool_foreground=self.hyp.pool_foreground)
         self.bbox_loss = BboxLoss(m.reg_max).to(device)
         self.margin_loss = ObjBgMarginLoss(margin=1.0).to(device) if self.hyp.use_backgrounds else None
         self.proto_proj_head = m.proto_proj
@@ -456,13 +456,6 @@ class v8DetectionLoss:
 
                         if self.hyp.use_backgrounds:
                             loss[loss_idx["bgl"]] = self.margin_loss(obj_emb, bg_emb)
-                else:
-                    if self.use_contr_loss:
-                        loss[loss_idx["ptcl"]] = 0.0
-                    else:
-                        loss[loss_idx["ptl"]] = 0.0
-                        if self.hyp.use_backgrounds:
-                            loss[loss_idx["bgl"]] = 0.0
             
             features = local_obj_features
             bg_features = local_bg_features
