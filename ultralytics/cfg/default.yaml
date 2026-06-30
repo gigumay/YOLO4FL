@@ -140,7 +140,7 @@ ptcl:  # (float) Prototype contrastive loss gain
 distance_metric: # (string) metric used to calculate prototype distance ("l2"/"cosine"/"l2_raw"/"mmd"/"mmd_raw"); only used when use_backgrounds=False
 single_proto_obj: # (bool) whether to extract a single object prototype (embedding cluster)
 project_features:  # (bool) project pooled object/background/prototype features through an MLP head before the prototype loss
-contr_temp: # (float) temperature for the prototype-contrastive (InfoNCE) loss
+contr_temp: 0.1 # (float) temperature for the prototype-contrastive (InfoNCE) loss
 features_out_dir_train: #(str) where to save the features extracted during training.
 features_out_dir_val: #(str) where to save the features extracted during validation (None = do not write to file).
 
