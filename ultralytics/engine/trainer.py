@@ -355,7 +355,7 @@ class BaseTrainer:
             for i, batch in enumerate(pbar):
                 with autocast(self.amp):
                     batch = self.preprocess_batch(batch)
-                    _, _, features, _ = model(batch, return_features=True)
+                    _, _, features = model(batch, return_features=True)
 
                     if features is None:
                         continue  # skip if no features extracted (e.g., no foreground objects)
@@ -531,7 +531,7 @@ class BaseTrainer:
             LOGGER.info(f"\n{epoch - self.start_epoch + 1} epochs completed in {seconds / 3600:.3f} hours.")
             
             # collect training set features (only when an output location is configured)
-            if self.args.use_prototypes:
+            if self.args.features_out_dir_train:
                 self._collect_features()
 
             self.final_eval(strip_last=False)
@@ -802,8 +802,6 @@ class BaseTrainer:
                 for k in (
                     "agg_period",
                     "ptl",
-                    "ptcl",
-                    "contr_temp",
                     "align_prototypes",
                     "data",
                     "global_obj_protos",

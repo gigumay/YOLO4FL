@@ -21,42 +21,6 @@ from .utils import bias_init_with_prob, linear_init
 __all__ = "Detect", "Segment", "Pose", "Classify", "OBB", "RTDETRDecoder", "v10Detect", "YOLOEDetect", "YOLOESegment"
 
 
-class ProjectionHead(nn.Module):
-    """
-    Small MLP projection head (SimCLR / SupCon style) for prototype alignment.
-
-    Maps pooled object / background / prototype feature vectors into a separate
-    embedding space where the prototype-alignment or prototype-contrastive loss is
-    applied. The point is to *decouple* the auxiliary prototype objective from the
-    shared detection features: gradients shape this throwaway embedding and only
-    gently reach the backbone, instead of yanking the detection features directly.
-
-    It is invoked only from the loss (on pooled vectors), never from ``forward()``,
-    so inference and export are unaffected. It is registered as a submodule of
-    ``Detect`` so its parameters are tracked by the optimizer, saved in the
-    checkpoint, and aggregated by FedAvg across federated clients.
-
-    Args:
-        in_dim (int): Dimensionality of the pooled input features.
-        out_dim (int): Embedding dimensionality.
-        hidden_dim (int | None): Hidden width; defaults to ``in_dim``.
-    """
-
-    def __init__(self, in_dim: int, out_dim: int = 128, hidden_dim: Optional[int] = None):
-        """Initialize the projection head with input, hidden, and output dimensions."""
-        super().__init__()
-        hidden_dim = hidden_dim or in_dim
-        self.net = nn.Sequential(
-            nn.Linear(in_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim),  # LayerNorm: stable for the tiny / variable object counts per step
-            nn.ReLU(inplace=True),
-            nn.Linear(hidden_dim, out_dim),
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Project pooled features of shape (N, in_dim) to embeddings of shape (N, out_dim)."""
-        return self.net(x)
-
 
 class Detect(nn.Module):
     """
@@ -111,7 +75,6 @@ class Detect(nn.Module):
     strides = torch.empty(0)  # init
     legacy = False  # backward compatibility for v3/v5/v8/v9 models
     xyxy = False  # xyxy or xywh output
-    proto_embed_dim = 128  # embedding dim of the prototype-alignment projection head (FedProto)
 
     def __init__(self, nc: int = 80, ch: Tuple = ()):
         """
@@ -144,9 +107,6 @@ class Detect(nn.Module):
             )
         )
         self.dfl = DFL(self.reg_max) if self.reg_max > 1 else nn.Identity()
-
-        # Projection head for prototype alignment / contrastive loss (FedProto).
-        self.proto_proj = ProjectionHead(ch[0], out_dim=self.proto_embed_dim)
 
         if self.end2end:
             self.one2one_cv2 = copy.deepcopy(self.cv2)

@@ -634,8 +634,7 @@ class Model(torch.nn.Module):
         self.metrics = validator.metrics
         if args.get("return_features_val"):
             self.features = getattr(validator, "features", None)
-            self.bg_features = getattr(validator, "bg_features", None)
-            return validator.metrics, self.features, self.bg_features
+            return validator.metrics, self.features
         return validator.metrics
 
     def benchmark(self, data=None, format="", verbose=False, **kwargs: Any):

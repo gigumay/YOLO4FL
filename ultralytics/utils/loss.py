@@ -11,7 +11,7 @@ from typing import Union
 from collections import OrderedDict
 
 from ultralytics.utils.metrics import OKS_SIGMA
-from ultralytics.utils.ops import crop_mask, xywh2xyxy, xyxy2xywh, compute_dist2global, compute_mmd2
+from ultralytics.utils.ops import crop_mask, xywh2xyxy, xyxy2xywh, compute_dist2global
 from ultralytics.utils.tal import RotatedTaskAlignedAssigner, TaskAlignedAssigner, TALFeatureExtractor, dist2bbox, dist2rbox, make_anchors
 from ultralytics.utils.torch_utils import autocast
 
@@ -141,45 +141,6 @@ class BboxLoss(nn.Module):
             loss_dfl = torch.tensor(0.0).to(pred_dist.device)
 
         return loss_iou, loss_dfl
-    
-
-class ProtoContrastiveLoss(nn.Module):
-    """
-    Prototype-anchored contrastive loss..
-    """
-
-    def __init__(self, temperature: float = 0.1):
-        super().__init__()
-        self.temperature = temperature
-
-    def forward(self, obj_emb: torch.Tensor, proto_emb: torch.Tensor, bg_emb: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            obj_emb (torch.Tensor):         object embeddings of shape (N_obj, D).
-            proto_emb (torch.Tensor):       global prototype embeddings (positives) of shape (N_proto, D).
-            bg_emb (torch.Tensor):          background embeddings (negatives) of shape (N_bg, D) or None.
-        Returns:
-            scalar loss
-        """
-        if obj_emb is None or obj_emb.numel() == 0 or proto_emb is None or proto_emb.numel() == 0:
-            ref = obj_emb if obj_emb is not None else proto_emb
-            return torch.tensor(0.0, device=ref.device)
-
-        obj = F.normalize(obj_emb, p=2, dim=1)
-        pos = F.normalize(proto_emb, p=2, dim=1)
-        # positive logits: (N_obj, N_proto). logsumexp over prototypes handles the multi-positive case
-        pos_logits = obj @ pos.t() / self.temperature
-
-        if bg_emb is not None and bg_emb.numel() > 0:
-            neg = F.normalize(bg_emb, p=2, dim=1)
-            neg_logits = obj @ neg.t() / self.temperature  # (N_obj, N_bg)
-            all_logits = torch.cat([pos_logits, neg_logits], dim=1)
-        else:
-            all_logits = pos_logits
-
-        # InfoNCE: -log( sum_pos exp(s) / sum_{pos+neg} exp(s) )
-        loss = torch.logsumexp(all_logits, dim=1) - torch.logsumexp(pos_logits, dim=1)
-        return loss.mean()
 
 
 class RotatedBboxLoss(BboxLoss):
@@ -250,12 +211,6 @@ class v8DetectionLoss:
         if self.hyp.align_prototypes:
             self.global_obj_protos = torch.load(self.hyp.global_obj_protos).to(device).detach()
             assert len(self.global_obj_protos.shape) == 2, "Global prototypes should be stored as a 2D tensor"
-            """
-            distance_metric only governs the alignment path (use_backgrounds=False); the contrastive
-            path operates in cosine space and ignores it.
-            """
-            if not self.hyp.use_backgrounds:
-                assert self.hyp.distance_metric in ["l2", "cosine", "l2_raw", "mmd", "mmd_raw"], "Invalid distance metric!"
 
         self.stride = m.stride  # model strides
         self.nc = m.nc  # number of classes
@@ -266,26 +221,9 @@ class v8DetectionLoss:
         self.use_dfl = m.reg_max > 1
 
         self.assigner = TaskAlignedAssigner(topk=tal_topk, num_classes=self.nc, alpha=0.5, beta=6.0)
-        self.extractor = TALFeatureExtractor(bg_ratio=self.hyp.bg_ratio, hard_frac=self.hyp.bg_hard_frac,
-                                             pool_foreground=self.hyp.pool_foreground)
+        self.extractor = TALFeatureExtractor()
         self.bbox_loss = BboxLoss(m.reg_max).to(device)
-        self.proto_proj_head = m.proto_proj
-        self.project_features = self.hyp.project_features
-        self.proto_contrastive_loss = ProtoContrastiveLoss(temperature=self.hyp.contr_temp).to(device) if self.hyp.use_backgrounds else None
         self.proj = torch.arange(m.reg_max, dtype=torch.float, device=device)
-        self.gain_map = {"box": self.hyp.box,
-                         "cls": self.hyp.cls,
-                         "dfl": self.hyp.dfl,
-                         "ptl": self.hyp.ptl,
-                         "ptcl": self.hyp.ptcl}
-
-
-    def build_loss_layout(self) -> List[str]:
-        layout = ["box", "cls", "dfl"]
-        if self.hyp.use_prototypes:
-            # use_backgrounds selects the contrastive (ptcl) loss; otherwise plain prototype alignment (ptl)
-            layout.append("ptcl" if self.hyp.use_backgrounds else "ptl")
-        return layout
 
 
     def preprocess(self, targets: torch.Tensor, batch_size: int, scale_tensor: torch.Tensor) -> torch.Tensor:
@@ -316,22 +254,8 @@ class v8DetectionLoss:
         return dist2bbox(pred_dist, anchor_points, xywh=False)
 
 
-    def _project(self, feats: torch.Tensor) -> torch.Tensor:
-        """Project pooled features through the prototype-alignment.
-
-        Returns the features unchanged when projection is disabled.
-        """
-        if feats is None or not self.project_features:
-            return feats
-        return self.proto_proj_head(feats)
-
-
     def __call__(self, preds: Any, embds: list, batch: Dict[str, torch.Tensor], return_features: bool = False) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Calculate the sum of the loss for box, cls and dfl multiplied by batch size."""
-        loss_layout = self.build_loss_layout()
-        loss_idx = {name: i for i, name in enumerate(loss_layout)}
-        loss = torch.zeros(len(loss_layout), device=self.device)
-
+        loss = torch.zeros(4, device=self.device)
 
         feats = preds[1] if isinstance(preds, tuple) else preds
         pred_distri, pred_scores = torch.cat([xi.view(feats[0].shape[0], self.no, -1) for xi in feats], 2).split(
@@ -372,12 +296,12 @@ class v8DetectionLoss:
 
         # Cls loss
         # loss[1] = self.varifocal_loss(pred_scores, target_scores, target_labels) / target_scores_sum  # VFL way
-        loss[loss_idx["cls"]] = self.bce(pred_scores, target_scores.to(dtype)).sum() / target_scores_sum  # BCE
+        loss[1] = self.bce(pred_scores, target_scores.to(dtype)).sum() / target_scores_sum  # BCE
 
         # Bbox loss
         if fg_mask.sum():
             target_bboxes /= stride_tensor
-            loss[loss_idx["box"]], loss[loss_idx["dfl"]] = self.bbox_loss(
+            loss[0], loss[2] = self.bbox_loss(
                 pred_distri, pred_bboxes, anchor_points, target_bboxes, target_scores, target_scores_sum, fg_mask
             )
 
@@ -385,48 +309,28 @@ class v8DetectionLoss:
         Generate prototypes
         """
         if return_features or self.hyp.align_prototypes:
-            local_obj_features = self.extractor(embds=embds, fg_mask=fg_mask, target_gt_idx=target_gt_idx)  
-
-            if self.hyp.use_backgrounds:
-                local_bg_features = self.extractor(embds=embds, fg_mask=fg_mask, target_gt_idx=target_gt_idx,
-                                                   mode="background", pred_scores=pred_scores.detach())
-            else:
-                local_bg_features = None
+            local_obj_features = self.extractor(embds=embds, fg_mask=fg_mask, target_gt_idx=target_gt_idx)
 
             if self.hyp.align_prototypes:
                 # This guards against cases where a prootype could not be extracted form the data
                 if local_obj_features is not None:
                     assert local_obj_features.shape[-1] != (self.nc + self.reg_max * 4), "Feature MixUp!"
-                    # Project local features and the (raw-space) frozen global prototype
-                    obj_emb = self._project(local_obj_features)
-                    bg_emb = self._project(local_bg_features) if self.hyp.use_backgrounds else None
-                    # Detach so the prototype is a pure (fixed) target in the current embedding space
-                    proto_emb = self._project(self.global_obj_protos).detach()
 
-                    if self.hyp.use_backgrounds:
-                        # contrastive loss: backgrounds are the negatives (cosine space)
-                        loss[loss_idx["ptcl"]] = self.proto_contrastive_loss(obj_emb, proto_emb, bg_emb)
-                    elif self.hyp.distance_metric in ("mmd", "mmd_raw"):
-                        # two-sided distribution alignment with the target set (kxx penalizes collapse)
-                        loss[loss_idx["ptl"]] = compute_mmd2(local_feats=obj_emb, global_feats=proto_emb,
-                                                             normalize=self.hyp.distance_metric == "mmd")
-                    else:
-                        obj_distances_bb = compute_dist2global(local_proto=obj_emb,
-                                                                global_proto=proto_emb,
-                                                                metric=self.hyp.distance_metric)
-                        assert len(obj_distances_bb.shape) == 1 and obj_distances_bb.shape[0] == obj_emb.shape[0]
-                        loss[loss_idx["ptl"]] = obj_distances_bb.mean()
+                    obj_distances_bb = compute_dist2global(local_proto=local_obj_features, global_proto=self.global_obj_protos)
+                    assert len(obj_distances_bb.shape) == 1 and obj_distances_bb.shape[0] == local_obj_features.shape[0]
+                    loss[3] = obj_distances_bb.mean()
             
             features = local_obj_features
-            bg_features = local_bg_features
         else:
             features = None
-            bg_features = None
 
-        for name, idx in loss_idx.items():
-            loss[idx] *= self.gain_map[name]
 
-        return loss * batch_size, loss.detach(), features, bg_features
+        loss[0] *= self.hyp.box
+        loss[1] *= self.hyp.cls
+        loss[2] *= self.hyp.dfl
+        loss[3] *= self.hyp.ptl
+
+        return loss * batch_size, loss.detach(), features
 
 
 class v8SegmentationLoss(v8DetectionLoss):

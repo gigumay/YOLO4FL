@@ -146,11 +146,7 @@ class DetectionTrainer(BaseTrainer):
 
     def get_validator(self):
         """Return a DetectionValidator for YOLO model validation."""
-        self.loss_names = ["box_loss", "cls_loss", "dfl_loss"]
-
-        if self.args.use_prototypes:
-            # use_backgrounds selects the contrastive (ptcl) loss; otherwise plain prototype alignment (ptl)
-            self.loss_names.append("ptcl" if self.args.use_backgrounds else "ptl")
+        self.loss_names = ["box_loss", "cls_loss", "dfl_loss", "ptl"]
 
 
         self.loss_names = tuple(self.loss_names)

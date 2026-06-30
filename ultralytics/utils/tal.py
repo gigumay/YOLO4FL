@@ -367,122 +367,44 @@ class RotatedTaskAlignedAssigner(TaskAlignedAssigner):
     
 
 
-
-
 class TALFeatureExtractor(nn.Module):
     """
-    Extract object-level or hard-negative background features
-    from feature maps using TAL assignments.
-
-    Args:
-        bg_ratio (float): Number of background negatives drawn per image, as a multiple of the number of
-            GT objects in that image (k ≈ bg_ratio * n_objects). bg_ratio=1.0 matches the legacy behavior.
-            bg_ratio=-1.0 uses all available background features.
-        hard_frac (float): Fraction of the drawn negatives taken as the hardest (highest predicted
-            confidence); the remainder are sampled at random for broader coverage. hard_frac=1.0 takes
-            only the hardest negatives (legacy behavior).
-        pool_foreground (bool): If True (default), anchors assigned to the same GT are mean-pooled into a
-            single object prototype. If False, each positive anchor's feature is kept separately.
+    Extract object-level features from feature maps using TAL assignments.
     """
 
-    def __init__(self, bg_ratio: float = 1.0, hard_frac: float = 1.0, pool_foreground: bool = True):
+    def __init__(self):
         super().__init__()
-        self.bg_ratio = bg_ratio
-        self.hard_frac = hard_frac
-        self.pool_foreground = pool_foreground
 
-    def forward(self, embds: list, fg_mask: torch.Tensor, target_gt_idx: torch.Tensor = None, pred_scores: torch.Tensor = None,
-                mode: str = "foreground") -> torch.Tensor:
+    def forward(self, embds: list, fg_mask: torch.Tensor, target_gt_idx: torch.Tensor = None) -> torch.Tensor:
         """
         Args:
             embds (list):                   list of feature maps [(B, C, H_i, W_i), ...]
             fg_mask (torch.Tensor):         foreground anchor mask from TAL of shape (B, A), where A is total number of anchors.
-            target_gt_idx (torch.Tensor):   GT assignment per anchor of shape (B, A). Required for foreground mode.
-            pred_scores (torch.Tensor):     raw classification logits of shape (B, A, num_classes). Required for background mode.
-            mode (str):                     "foreground" or "background". Determines which features to extract.
+            target_gt_idx (torch.Tensor):   GT assignment per anchor of shape (B, A)
         Returns:
-            foreground (torch.Tensor):      tensor of extracted features for foreground objects with shape (N_objects, C)
-            background (torch.Tensor):      tensor of extracted features for hard-negative background objects with shape (N_hard_negatives, C)
+            feature (torch.Tensor):         tensor of extracted features for foreground objects with shape (N_objects, C)
         """
-
-        assert mode in ["foreground", "background"]
         
         all_feats = torch.cat([f.flatten(2) for f in embds], dim=2)
         bs = fg_mask.shape[0]
         out_features = []
 
         for b in range(bs):
-            if mode == "foreground":
-                pos_idx = fg_mask[b].nonzero(as_tuple=True)[0]
+            pos_idx = fg_mask[b].nonzero(as_tuple=True)[0]
 
-                if pos_idx.numel() == 0:
-                    continue
+            if pos_idx.numel() == 0:
+                continue
 
-                gt_idx = target_gt_idx[b, pos_idx]      # (P,)
-                feats_pos = all_feats[b, :, pos_idx]    # (C, P)
+            gt_idx = target_gt_idx[b, pos_idx]      # (P,)
+            feats_pos = all_feats[b, :, pos_idx]    # (C, P)
 
-                if self.pool_foreground:
-                    for g in gt_idx.unique():
-                        sel_mask = gt_idx == g
-                        sel_feats = feats_pos[:, sel_mask]  # (C, K)
-                        # mean pool anchors assigned to same GT
-                        obj_proto = sel_feats.mean(dim=1)
-                        out_features.append(obj_proto)
-                else:
-                    # keep each positive anchor's feature separately
-                    out_features.extend(feats_pos.T)
+            for g in gt_idx.unique():
+                sel_mask = gt_idx == g
+                sel_feats = feats_pos[:, sel_mask]  # (C, K)
+                # mean pool anchors assigned to same GT
+                obj_proto = sel_feats.mean(dim=1)
+                out_features.append(obj_proto)         
             
-            elif mode == "background":
-
-                assert pred_scores is not None, "pred_scores required for background extraction"
-
-                # positive anchors
-                pos_idx = fg_mask[b].nonzero(as_tuple=True)[0]
-                # skip images with no objects
-                if pos_idx.numel() == 0:
-                    continue
-
-                # number of GT objects
-                n_objects = target_gt_idx[b, pos_idx].unique().numel()
-
-                # background anchors
-                bg_idx = (~fg_mask[b]).nonzero(as_tuple=True)[0]
-                if bg_idx.numel() == 0:
-                    continue
-
-                # bg_ratio == -1.0 uses all available background features; hardness ranking is irrelevant
-                if self.bg_ratio == -1.0:
-                    hard_bg_idx = bg_idx
-                else:
-                    # predicted class probabilities; hardness = highest predicted class confidence
-                    bg_hardness = pred_scores[b, bg_idx].sigmoid().max(dim=-1).values
-
-                    # total negatives for this image, split into hardest + random (positions into bg_idx)
-                    k = min(int(self.bg_ratio * n_objects), bg_idx.numel())
-                    n_hard = min(int(round(self.hard_frac * k)), k)
-
-                    hard_sel = torch.topk(bg_hardness, k=n_hard, largest=True).indices if n_hard > 0 \
-                        else bg_idx.new_empty(0, dtype=torch.long)
-
-                    # random negatives drawn from the remaining (non-hardest) backgrounds for broader coverage
-                    n_rand = k - n_hard
-                    if n_rand > 0:
-                        remaining = torch.ones(bg_idx.numel(), dtype=torch.bool, device=bg_idx.device)
-                        remaining[hard_sel] = False
-                        rem_idx = remaining.nonzero(as_tuple=True)[0]
-                        n_rand = min(n_rand, rem_idx.numel())
-                        rand_sel = rem_idx[torch.randperm(rem_idx.numel(), device=bg_idx.device)[:n_rand]] if n_rand > 0 \
-                            else bg_idx.new_empty(0, dtype=torch.long)
-                        sel = torch.cat([hard_sel, rand_sel])
-                    else:
-                        sel = hard_sel
-
-                    hard_bg_idx = bg_idx[sel]
-                    
-                # extract features, keeping each negative separately
-                hard_bg_feats = all_feats[b, :, hard_bg_idx]  # (C, k)
-                out_features.extend(hard_bg_feats.T)
-
         if len(out_features) == 0:
             return None
 
