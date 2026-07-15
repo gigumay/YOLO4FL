@@ -337,8 +337,8 @@ class BaseModel(torch.nn.Module):
             self.criterion = self.init_criterion()
 
         preds = self.forward(batch["img"]) if preds is None else preds
-        # extract embeddings
-        embds_curr = torch.stack(self.forward(batch["img"], embed=[len(self.model) - 2]), 0)
+        # extract embeddings; layers must match the ones used to generate the on-disk embeddings (MOON._prep_single_dir)
+        embds_curr = torch.stack(self.forward(batch["img"], embed=[16, 19, 22]), 0)
 
         return self.criterion(preds, batch, embds_curr)
 
