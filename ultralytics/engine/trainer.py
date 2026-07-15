@@ -486,7 +486,7 @@ class BaseTrainer:
             self.lr = {f"lr/pg{ir}": x["lr"] for ir, x in enumerate(self.optimizer.param_groups)}  # for loggers
             self.run_callbacks("on_train_epoch_end")
             if RANK in {-1, 0}:
-                final_epoch = (epoch + 1 >= self.epochs) or (self.args.agg_period > 0 and ((epoch + 1) - self.start_epoch) >= self.args.agg_period)
+                final_epoch = epoch + 1 >= self.epochs
                 self.ema.update_attr(self.model, include=["yaml", "nc", "args", "names", "stride", "class_weights"])
 
                 # Validation
@@ -534,7 +534,7 @@ class BaseTrainer:
             if self.args.features_out_dir_train:
                 self._collect_features()
 
-            self.final_eval(strip_last=False)
+            self.final_eval()
             if self.args.plots:
                 self.plot_metrics()
             self.run_callbacks("on_train_end")
@@ -606,7 +606,7 @@ class BaseTrainer:
                 "model": None,  # resume and final checkpoints derive from EMA
                 "ema": deepcopy(self.ema.ema).half(),
                 "updates": self.ema.updates,
-                "optimizer": self.optimizer.state_dict(),
+                "optimizer": convert_optimizer_state_dict_to_fp16(deepcopy(self.optimizer.state_dict())),
                 "train_args": vars(self.args),  # save as dict
                 "train_metrics": {**self.metrics, **{"fitness": self.fitness}},
                 "train_results": self.read_results_csv(),
@@ -767,12 +767,12 @@ class BaseTrainer:
         path = Path(name)
         self.plots[path] = {"data": data, "timestamp": time.time()}
 
-    def final_eval(self, strip_last=True):
+    def final_eval(self):
         """Perform final evaluation and validation for object detection YOLO model."""
         ckpt = {}
         for f in self.last, self.best:
             if f.exists():
-                if f is self.last and strip_last:
+                if f is self.last:
                     ckpt = strip_optimizer(f)
                 elif f is self.best:
                     k = "train_results"  # update best.pt train_metrics from last.pt
@@ -800,13 +800,6 @@ class BaseTrainer:
                 self.args = get_cfg(ckpt_args)
                 self.args.model = self.args.resume = str(last)  # reinstate model
                 for k in (
-                    "agg_period",
-                    "ptl",
-                    "align_prototypes",
-                    "data",
-                    "global_obj_protos",
-                    "features_out_dir_train",
-                    "features_out_dir_val",
                     "imgsz",
                     "batch",
                     "device",
