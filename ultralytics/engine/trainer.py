@@ -451,7 +451,7 @@ class BaseTrainer:
             self.lr = {f"lr/pg{ir}": x["lr"] for ir, x in enumerate(self.optimizer.param_groups)}  # for loggers
             self.run_callbacks("on_train_epoch_end")
             if RANK in {-1, 0}:
-                final_epoch = (epoch + 1 >= self.epochs) or (self.args.agg_period > 0 and ((epoch + 1) - self.start_epoch) >= self.args.agg_period)
+                final_epoch = epoch + 1 >= self.epochs
                 self.ema.update_attr(self.model, include=["yaml", "nc", "args", "names", "stride", "class_weights"])
 
                 # Validation
@@ -566,7 +566,7 @@ class BaseTrainer:
                 "model": None,  # resume and final checkpoints derive from EMA
                 "ema": deepcopy(self.ema.ema).half(),
                 "updates": self.ema.updates,
-                "optimizer": self.optimizer.state_dict(),
+                "optimizer": convert_optimizer_state_dict_to_fp16(deepcopy(self.optimizer.state_dict())),
                 "train_args": vars(self.args),  # save as dict
                 "train_metrics": {**self.metrics, **{"fitness": self.fitness}},
                 "train_results": self.read_results_csv(),
@@ -733,8 +733,7 @@ class BaseTrainer:
         for f in self.last, self.best:
             if f.exists():
                 if f is self.last:
-                    # keep last.pt's optimizer state so training can be resumed from it across FL rounds
-                    continue
+                    ckpt = strip_optimizer(f)
                 elif f is self.best:
                     k = "train_results"  # update best.pt train_metrics from last.pt
                     strip_optimizer(f, updates={k: ckpt[k]} if k in ckpt else None)
@@ -761,7 +760,6 @@ class BaseTrainer:
                 self.args = get_cfg(ckpt_args)
                 self.args.model = self.args.resume = str(last)  # reinstate model
                 for k in (
-                    "agg_period",
                     "imgsz",
                     "batch",
                     "device",
