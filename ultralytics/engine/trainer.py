@@ -434,7 +434,7 @@ class BaseTrainer:
                 with autocast(self.amp):
                     batch = self.preprocess_batch(batch)
                     if self.args.task == "detect":
-                        loss, self.loss_items, _, _ = self.model(batch)
+                        loss, self.loss_items, _ = self.model(batch)
                     else:
                         loss, self.loss_items = self.model(batch)
                     
