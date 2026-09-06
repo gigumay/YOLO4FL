@@ -9,7 +9,7 @@ import zipfile
 from multiprocessing.pool import ThreadPool
 from pathlib import Path
 from tarfile import is_tarfile
-from typing import Any, Dict, List, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import cv2
 import numpy as np
@@ -41,8 +41,20 @@ PIN_MEMORY = str(os.getenv("PIN_MEMORY", not MACOS)).lower() == "true"  # global
 FORMATS_HELP_MSG = f"Supported formats are:\nimages: {IMG_FORMATS}\nvideos: {VID_FORMATS}"
 
 
-def img2label_paths(img_paths: List[str]) -> List[str]:
-    """Convert image paths to label paths by replacing 'images' with 'labels' and extension with '.txt'."""
+def img2label_paths(img_paths: List[str], label_dir: Optional[str] = None) -> List[str]:
+    """
+    Convert image paths to label paths by replacing 'images' with 'labels' and extension with '.txt'.
+
+    When `label_dir` is given, labels are read from a sibling directory of the split rather than from
+    beside the images, i.e. `<root>/<split>/foo.jpg` -> `<root>/<label_dir>/<split>/foo.txt`. This
+    lets several label sets share a single copy of the imagery. The value comes from the optional
+    `label_dir` key of the dataset yaml; absent or empty, the stock behaviour below is reproduced
+    exactly.
+    """
+    if label_dir:
+        return [
+            str(Path(x).parents[1] / label_dir / Path(x).parent.name / (Path(x).stem + ".txt")) for x in img_paths
+        ]
     sa, sb = f"{os.sep}images{os.sep}", f"{os.sep}labels{os.sep}"  # /images/, /labels/ substrings
     return [sb.join(x.rsplit(sa, 1)).rsplit(".", 1)[0] + ".txt" for x in img_paths]
 
