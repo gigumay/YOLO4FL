@@ -803,10 +803,15 @@ def save_dataset_cache_file(prefix: str, path: Path, x: Dict, version: str):
     """Save an Ultralytics dataset *.cache dictionary x to path."""
     x["version"] = version  # add cache version
     if is_dir_writeable(path.parent):
-        if path.exists():
-            path.unlink()  # remove *.cache file if exists
-        with open(str(path), "wb") as file:  # context manager here fixes windows async np.save bug
-            np.save(file, x)
+        # Write to a process-private file and rename it into place: runs training on the same dataset at the same
+        # time share this *.cache file, and one reading it while another is mid-write gets an empty file (EOFError)
+        tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+        try:
+            with open(str(tmp), "wb") as file:  # context manager here fixes windows async np.save bug
+                np.save(file, x)
+            os.replace(tmp, path)  # atomic, overwrites the *.cache file if exists
+        finally:
+            tmp.unlink(missing_ok=True)  # only still there if the write failed
         LOGGER.info(f"{prefix}New cache created: {path}")
     else:
         LOGGER.warning(f"{prefix}Cache directory {path.parent} is not writeable, cache not saved.")
