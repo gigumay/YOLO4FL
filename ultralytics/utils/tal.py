@@ -2,11 +2,12 @@
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from . import LOGGER
 from .checks import check_version
 from .metrics import bbox_iou, probiou
-from .ops import xywhr2xyxyxyxy
+from .ops import xywh2xyxy, xywhr2xyxyxyxy
 
 TORCH_1_10 = check_version(torch.__version__, "1.10.0")
 
@@ -417,3 +418,147 @@ def dist2rbox(pred_dist, pred_angle, anchor_points, dim=-1):
     x, y = xf * cos - yf * sin, xf * sin + yf * cos
     xy = torch.cat([x, y], dim=dim) + anchor_points
     return torch.cat([xy, lt + rb], dim=dim)
+
+
+def presence_targets(gt_xyxy, gt_cls, batch_idx, bs, shapes, strides, nc, tau=0.3, inst_pow=0.0, chunk=256):
+    """
+    Build the per-level presence targets and per-cell loss weights from ground-truth boxes.
+
+    For a box of area A and a cell of side s (the level's stride), let I be their overlap. The cell is positive for
+    that box if I / min(A, s²) >= tau, i.e. the cell holds at least tau of the box OR the box covers at least tau of
+    the cell. Each box also always marks its best cell (highest I / min(A, s²)) on every level, so no box is ever
+    missing from a level's target. A cell's target is 1 if any box marks it, else 0.
+
+    A cell that a box overlaps (I > 0) but that no box marks is ignored: it gets weight 0, so it adds no loss and is
+    not scored. These are the border cells of a box, which hold a part of an animal too small to count as positive;
+    whether they hold any animal at all depends on how tightly the box was drawn. Every other cell has weight 1,
+    except that with `inst_pow > 0` the positive cells of a box weigh 1 / n**inst_pow, where n is the number of cells
+    the box marks on that level, so that large animals do not outweigh small ones. Where boxes share a positive cell,
+    the largest weight wins.
+
+    Args:
+        gt_xyxy (torch.Tensor): Boxes in input-image pixels, xyxy, shape (N, 4).
+        gt_cls (torch.Tensor): Class index of each box, shape (N,) or (N, 1).
+        batch_idx (torch.Tensor): Index of the image each box belongs to, shape (N,).
+        bs (int): Batch size.
+        shapes (List[Tuple[int, int]]): Grid size (h, w) of each level.
+        strides (List[float]): Stride of each level in pixels.
+        nc (int): Number of classes.
+        tau (float): Overlap threshold, as a fraction of the box or of the cell.
+        inst_pow (float): Exponent of the per-box weight of positive cells: 0 gives every positive cell weight 1,
+            0.5 gives 1 / sqrt(n), 1 gives each box a total weight of 1 per level.
+        chunk (int): Max number of boxes processed at once. Only bounds the memory of the (boxes, h, w) overlap
+            tensor in dense batches; the result does not depend on it.
+
+    Returns:
+        targets (List[torch.Tensor]): One (bs, nc, h, w) tensor of 0/1 targets per level.
+        weights (List[torch.Tensor]): One (bs, nc, h, w) tensor of loss weights per level: 0 for ignored cells, 1 for
+            negative cells, and 1 (or 1 / n**inst_pow) for positive cells.
+    """
+    device = gt_xyxy.device
+    gt_xyxy = gt_xyxy.float().view(-1, 4)
+    area = (gt_xyxy[:, 2] - gt_xyxy[:, 0]).clamp(0) * (gt_xyxy[:, 3] - gt_xyxy[:, 1]).clamp(0)
+    valid = area > 0  # degenerate boxes would otherwise mark an arbitrary best cell
+    gt_xyxy, area = gt_xyxy[valid], area[valid]
+    bi, ci = batch_idx.view(-1)[valid].long(), gt_cls.view(-1)[valid].long()
+
+    targets, weights = [], []
+    for (h, w), s in zip(shapes, strides):
+        s = float(s)
+        t = torch.zeros(bs, nc, h, w, device=device)  # number of boxes that mark each cell
+        u = torch.zeros(bs, nc, h, w, device=device)  # number of boxes that overlap each cell at all
+        wpos = torch.zeros(bs * nc, h * w, device=device) if inst_pow > 0 else None  # largest per-box weight
+        x0 = torch.arange(w, device=device, dtype=torch.float32) * s  # left edge of each cell column
+        y0 = torch.arange(h, device=device, dtype=torch.float32) * s  # top edge of each cell row
+        for i in range(0, len(gt_xyxy), chunk):
+            b = gt_xyxy[i : i + chunk]
+            n = len(b)
+            ox = (torch.minimum(b[:, 2:3], x0 + s) - torch.maximum(b[:, 0:1], x0)).clamp_(0)  # (n, w)
+            oy = (torch.minimum(b[:, 3:4], y0 + s) - torch.maximum(b[:, 1:2], y0)).clamp_(0)  # (n, h)
+            inter = oy[:, :, None] * ox[:, None, :]  # (n, h, w), overlap I of every box with every cell
+            score = inter / area[i : i + chunk].clamp(max=s * s)[:, None, None]  # I / min(A, s²)
+            pos = score >= tau
+            best_val, best = score.view(n, -1).max(1)
+            hit = best_val > 0  # box overlaps the grid at all
+            pos.view(n, -1)[torch.arange(n, device=device)[hit], best[hit]] = True  # best-cell fallback
+            idx = (bi[i : i + chunk], ci[i : i + chunk])
+            t.index_put_(idx, pos.float(), accumulate=True)
+            u.index_put_(idx, (score > 0).float(), accumulate=True)
+            if wpos is not None:
+                p = pos.view(n, -1).float()
+                wb = p.sum(1).clamp_(min=1).pow_(-inst_pow)  # 1 / n**inst_pow, n = cells this box marks
+                k = (idx[0] * nc + idx[1])[:, None].expand(-1, h * w)
+                wpos.scatter_reduce_(0, k, p * wb[:, None], reduce="amax")  # shared cells keep the largest weight
+        t = (t > 0).float()
+        wt = torch.where(t > 0, torch.ones_like(t) if wpos is None else wpos.view_as(t), (u == 0).float())
+        targets.append(t)
+        weights.append(wt)
+    return targets, weights
+
+
+def presence_batch_targets(batch, bs, shapes, strides, nc, tau=0.3, inst_pow=0.0, device=None):
+    """
+    Return the presence targets and loss weights of a dataloader batch, building them at most once per batch.
+
+    During validation in training, the loss and the metrics both need the targets of the same batch. The result is
+    therefore cached in `batch["presence_targets"]` together with the arguments it was built from, and reused when a
+    later call passes the same arguments.
+
+    Args:
+        batch (Dict[str, torch.Tensor]): Batch with 'bboxes' (N, 4) normalized xywh, 'cls' (N, 1) and 'batch_idx'
+            (N,), where N is the number of boxes across the whole batch.
+        bs (int): Batch size.
+        shapes (List[Tuple[int, int]]): Grid size (h, w) of each level.
+        strides (List[float]): Stride of each level in pixels. The network input size is shapes[0] * strides[0].
+        nc (int): Number of classes.
+        tau (float): Overlap threshold, see `presence_targets`.
+        inst_pow (float): Exponent of the per-box weight of positive cells, see `presence_targets`.
+        device (torch.device, optional): Device of the result. Defaults to the device of `batch["bboxes"]`.
+
+    Returns:
+        (Tuple[List[torch.Tensor], List[torch.Tensor]]): Per-level targets and weights, see `presence_targets`.
+    """
+    device = torch.device(device) if device is not None else batch["bboxes"].device
+    shapes = [(int(h), int(w)) for h, w in shapes]
+    strides = [float(s) for s in strides]
+    key = (tuple(shapes), tuple(strides), bs, nc, float(tau), float(inst_pow), str(device))
+    cached = batch.get("presence_targets")
+    if cached is not None and cached[0] == key:
+        return cached[1]
+    h, w = shapes[0][0] * strides[0], shapes[0][1] * strides[0]  # network input size in pixels
+    gt_xyxy = xywh2xyxy(batch["bboxes"].to(device).float() * torch.tensor([w, h, w, h], device=device))
+    out = presence_targets(
+        gt_xyxy, batch["cls"].to(device), batch["batch_idx"].to(device), bs, shapes, strides, nc, tau, inst_pow
+    )
+    batch["presence_targets"] = (key, out)
+    return out
+
+
+def fuse_presence_logits(logits):
+    """
+    Fuse per-level presence logits into one logit map on the finest grid.
+
+    Each level's logits are upsampled (nearest) to the largest grid and averaged. A cell therefore only scores high
+    where the levels agree.
+
+    Args:
+        logits (List[torch.Tensor]): Per-level logits, each (B, nc, H_i, W_i).
+
+    Returns:
+        (torch.Tensor): Fused logits, shape (B, nc, H, W) of the finest level.
+    """
+    size = max((tuple(x.shape[-2:]) for x in logits), key=lambda hw: hw[0] * hw[1])
+    return torch.stack([F.interpolate(x.float(), size=size, mode="nearest") for x in logits]).mean(0)
+
+
+def fuse_presence_maps(logits):
+    """
+    Fuse per-level presence logits into one probability map on the finest grid (sigmoid of `fuse_presence_logits`).
+
+    Args:
+        logits (List[torch.Tensor]): Per-level logits, each (B, nc, H_i, W_i).
+
+    Returns:
+        (torch.Tensor): Fused probabilities, shape (B, nc, H, W) of the finest level.
+    """
+    return fuse_presence_logits(logits).sigmoid()

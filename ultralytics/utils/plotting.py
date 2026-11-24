@@ -851,6 +851,7 @@ def plot_results(
     segment: bool = False,
     pose: bool = False,
     classify: bool = False,
+    presence: bool = False,
     on_plot: Optional[Callable] = None,
 ):
     """
@@ -863,6 +864,7 @@ def plot_results(
         segment (bool, optional): Flag to indicate if the data is for segmentation.
         pose (bool, optional): Flag to indicate if the data is for pose estimation.
         classify (bool, optional): Flag to indicate if the data is for classification.
+        presence (bool, optional): Flag to indicate if the data is for the presence task.
         on_plot (callable, optional): Callback function to be executed after plotting. Takes filename as an argument.
 
     Examples:
@@ -877,6 +879,9 @@ def plot_results(
     if classify:
         fig, ax = plt.subplots(2, 2, figsize=(6, 6), tight_layout=True)
         index = [2, 5, 3, 4]
+    elif presence:  # train loss, val loss, P, R, F1, AP, AP_fused, level_agree, level_agree_gt
+        fig, ax = plt.subplots(3, 3, figsize=(10, 9), tight_layout=True)
+        index = [2, 10, 3, 4, 5, 6, 7, 8, 9]
     elif segment:
         fig, ax = plt.subplots(2, 8, figsize=(18, 6), tight_layout=True)
         index = [2, 3, 4, 5, 6, 7, 10, 11, 14, 15, 16, 17, 8, 9, 12, 13]
@@ -910,6 +915,31 @@ def plot_results(
     plt.close()
     if on_plot:
         on_plot(fname)
+
+
+def overlay_heatmap(img: np.ndarray, heat: Union[np.ndarray, torch.Tensor], alpha: float = 0.5) -> np.ndarray:
+    """
+    Blend a [0, 1] heatmap over an image with the JET colormap, in proportion to the score.
+
+    Each pixel's blend weight is alpha * score, so areas with a low score keep the original image and areas with a
+    high score show the colour of the heatmap.
+
+    Args:
+        img (np.ndarray): BGR uint8 image, (H, W, 3).
+        heat (np.ndarray | torch.Tensor): Heatmap (h, w) with values in [0, 1], at any resolution. It is resized to
+            the image with nearest-neighbour interpolation, so every grid cell stays a visible block.
+        alpha (float): Weight of the heatmap in the blend where the score is 1.
+
+    Returns:
+        (np.ndarray): Blended BGR uint8 image, (H, W, 3).
+    """
+    if isinstance(heat, torch.Tensor):
+        heat = heat.detach().float().cpu().numpy()
+    heat = cv2.resize(np.asarray(heat, dtype=np.float32), (img.shape[1], img.shape[0]), interpolation=cv2.INTER_NEAREST)
+    heat = heat.clip(0, 1)
+    colored = cv2.applyColorMap((heat * 255).astype(np.uint8), cv2.COLORMAP_JET)
+    w = (alpha * heat)[..., None]  # per-pixel blend weight
+    return (img.astype(np.float32) * (1 - w) + colored.astype(np.float32) * w).round().astype(np.uint8)
 
 
 def plt_color_scatter(v, f, bins: int = 20, cmap: str = "viridis", alpha: float = 0.8, edgecolors: str = "none"):

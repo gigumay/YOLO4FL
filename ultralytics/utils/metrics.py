@@ -5,7 +5,7 @@ import math
 import warnings
 from collections import defaultdict
 from pathlib import Path
-from typing import Any, Dict, List, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -1520,6 +1520,233 @@ class ClassifyMetrics(SimpleClass, DataExportMixin):
             >>> print(classify_summary)
         """
         return [{"top1_acc": round(self.top1, decimals), "top5_acc": round(self.top5, decimals)}]
+
+
+class PresenceMetrics(SimpleClass, DataExportMixin):
+    """
+    Cell-level metrics for the presence task.
+
+    Every grid cell of every level is one binary prediction against a 0/1 target. Cells that the targets ignore (a box
+    overlaps them but marks none of them positive, see `presence_targets`) are left out. Instead of storing every
+    score, each cell is counted into one of `nbins` bins by its logit, separately for positive- and negative-target
+    cells. From these counts, true/false positives at every threshold follow, hence precision/recall curves and AP.
+    Memory stays fixed however large the validation set is.
+
+    The bins are uniform in logit space over [-lim, lim]; logits outside fall into the edge bins. In score terms they
+    are log-spaced near 0 and near 1, where a focal-loss model puts most of its cells, and about 0.0025 wide around
+    0.5. Binning logits rather than probabilities also keeps the ranking of FP16 outputs, whose probabilities round
+    to 1.0 above a logit of about 8.3 and lose resolution below a score of about 6e-5.
+
+    Attributes:
+        names (dict): Class names.
+        level_names (List[str]): Display name of each level, e.g. 'P3/8'.
+        level_stats (List[dict]): Per-level precision, recall, F1 (at `conf`) and AP, averaged over classes.
+        fused_stats (dict): The same for the fused map, scored against the finest level's targets.
+        p, r, f1, ap (float): Per-level values averaged over levels.
+        ap_fused (float): AP of the fused map.
+        level_agree (float): IoU between the positive cells of each coarser map and the max-pooled finer map,
+            averaged over adjacent level pairs, for the predictions. NaN if no level pair has any positive cell
+            (e.g. a model that does not predict anything above `conf` yet).
+        level_agree_gt (float): The same for the targets, as a reference.
+        speed (dict): Time per image for each validation step.
+    """
+
+    def __init__(self, names: Dict[int, str] = {}, conf: float = 0.5, nbins: int = 6400, lim: float = 16.0) -> None:
+        """
+        Initialize PresenceMetrics.
+
+        Args:
+            names (dict): Class names.
+            conf (float): Score threshold for precision, recall, F1 and level agreement.
+            nbins (int): Number of logit bins.
+            lim (float): The bins cover logits in [-lim, lim].
+        """
+        self.names = names
+        self.conf = conf
+        self.nbins = nbins
+        self.lim = lim
+        self.speed = {"preprocess": 0.0, "inference": 0.0, "loss": 0.0, "postprocess": 0.0}
+        self.task = "presence"
+        self.reset()
+
+    def reset(self) -> None:
+        """Clear all accumulated counts and results."""
+        self.hist = None  # (levels, nc, 2, nbins): [..., 0, :] negative cells, [..., 1, :] positive cells
+        self.hist_fused = None  # (nc, 2, nbins)
+        self.agree = None  # (levels - 1, 2): [intersection, union] of positive cells, predictions
+        self.agree_gt = None  # same for targets
+        self.level_names = []
+        self.level_stats, self.fused_stats = [], {"p": 0.0, "r": 0.0, "f1": 0.0, "ap": 0.0}
+        self.p = self.r = self.f1 = self.ap = self.ap_fused = 0.0
+        self.level_agree = self.level_agree_gt = 0.0
+
+    def _bins(self, logits: torch.Tensor) -> torch.Tensor:
+        """Logit bin of every cell; bin j covers logits in [-lim + j * w, -lim + (j + 1) * w), w = 2 * lim / nbins."""
+        n = self.nbins
+        return (logits.float() * (n / (2 * self.lim)) + n / 2).floor_().long().clamp_(0, n - 1)
+
+    def _conf_logit(self) -> float:
+        """Return the logit of `conf`, i.e. the logit threshold at which a cell counts as flagged."""
+        if self.conf <= 0 or self.conf >= 1:
+            return float("-inf") if self.conf <= 0 else float("inf")
+        return math.log(self.conf / (1 - self.conf))
+
+    def _conf_bin(self) -> int:
+        """Return the first bin whose cells count as flagged at `conf` (the nearest bin edge to its logit)."""
+        x = self._conf_logit() * self.nbins / (2 * self.lim) + self.nbins / 2
+        return int(round(min(max(x, 0.0), float(self.nbins))))
+
+    def _histogram(self, logits: torch.Tensor, targets: torch.Tensor, valid: torch.Tensor) -> torch.Tensor:
+        """Count the valid cells per (class, target, logit bin) for one (B, nc, h, w) map; returns (nc, 2, nbins)."""
+        nc, n = logits.shape[1], self.nbins
+        c = torch.arange(nc).view(1, nc, 1, 1)
+        idx = (c * 2 + targets.long()) * n + self._bins(logits)
+        return torch.bincount(idx[valid], minlength=nc * 2 * n).view(nc, 2, n)
+
+    @staticmethod
+    def _agreement(masks: List[torch.Tensor]) -> torch.Tensor:
+        """Intersection and union of positive cells between each coarser mask and the max-pooled finer mask."""
+        out = torch.zeros(len(masks) - 1, 2, dtype=torch.long)
+        for i, (fine, coarse) in enumerate(zip(masks[:-1], masks[1:])):
+            fine = torch.nn.functional.adaptive_max_pool2d(fine.float(), coarse.shape[-2:]).bool()
+            out[i, 0], out[i, 1] = (fine & coarse).sum(), (fine | coarse).sum()
+        return out
+
+    def update(
+        self,
+        logits: List[torch.Tensor],
+        targets: List[torch.Tensor],
+        valid: Optional[List[torch.Tensor]],
+        fused: torch.Tensor,
+        strides: List[float],
+    ) -> None:
+        """
+        Accumulate one batch.
+
+        Args:
+            logits (List[torch.Tensor]): Per-level predicted logits, each (B, nc, h, w).
+            targets (List[torch.Tensor]): Per-level 0/1 targets, same shapes.
+            valid (List[torch.Tensor] | None): Per-level boolean masks of the cells to score, same shapes; False for
+                the cells the targets ignore. None scores every cell.
+            fused (torch.Tensor): Fused logits on the finest grid, (B, nc, H, W), scored against the finest level.
+            strides (List[float]): Stride of each level, used for the level names.
+        """
+        logits = [x.detach().float().cpu() for x in logits]  # CPU: bincount is exact and deterministic there
+        targets = [t.cpu() for t in targets]
+        valid = [torch.ones_like(t, dtype=torch.bool) for t in targets] if valid is None else [v.cpu() for v in valid]
+        finest = max(range(len(targets)), key=lambda i: targets[i].shape[-2] * targets[i].shape[-1])
+        if self.hist is None:
+            nl, nc = len(logits), logits[0].shape[1]
+            self.hist = torch.zeros(nl, nc, 2, self.nbins, dtype=torch.long)
+            self.hist_fused = torch.zeros(nc, 2, self.nbins, dtype=torch.long)
+            self.agree = torch.zeros(max(nl - 1, 0), 2, dtype=torch.long)
+            self.agree_gt = torch.zeros_like(self.agree)
+            self.level_names = [f"P{int(math.log2(s))}/{int(s)}" for s in strides]
+        for i, (x, t, v) in enumerate(zip(logits, targets, valid)):
+            self.hist[i] += self._histogram(x, t, v)
+        self.hist_fused += self._histogram(fused.detach().float().cpu(), targets[finest], valid[finest])
+        if len(logits) > 1:
+            c = self._conf_logit()
+            self.agree += self._agreement([x >= c for x in logits])
+            self.agree_gt += self._agreement([t > 0 for t in targets])
+
+    @staticmethod
+    def _step_ap(recall: np.ndarray, precision: np.ndarray) -> float:
+        """
+        Area under the precision envelope, integrated step-wise over recall (VOC / sklearn style).
+
+        Unlike the 101-point linear interpolation of `compute_ap`, this does not draw lines between distant PR points.
+        Binned cell scores can give very few points (e.g. a model with near-constant output), and linear
+        interpolation from the (0, 1) sentinel would then overstate AP; here a constant score yields the positive rate.
+        """
+        mrec = np.concatenate(([0.0], recall, [1.0]))
+        mpre = np.concatenate(([1.0], precision, [0.0]))
+        mpre = np.flip(np.maximum.accumulate(np.flip(mpre)))  # precision envelope
+        i = np.where(mrec[1:] != mrec[:-1])[0]  # points where recall changes
+        return float(np.sum((mrec[i + 1] - mrec[i]) * mpre[i + 1]))
+
+    def _stats(self, hist: torch.Tensor) -> Dict[str, float]:
+        """Precision, recall, F1 (at `conf`) and AP from (nc, 2, nbins) counts, averaged over classes with positives."""
+        rows = []
+        k = self._conf_bin()  # first bin with score >= conf
+        for c in range(hist.shape[0]):
+            neg, pos = hist[c, 0].double(), hist[c, 1].double()
+            npos = float(pos.sum())
+            if npos == 0:
+                continue  # AP and recall undefined for a class without positive cells
+            tp = pos.flip(0).cumsum(0).flip(0)  # tp[j] = positive cells in bin j or above
+            fp = neg.flip(0).cumsum(0).flip(0)
+            p_curve = (tp / (tp + fp).clamp(min=1)).numpy()[::-1]  # thresholds descending -> recall ascending
+            r_curve = (tp / npos).numpy()[::-1]
+            keep = ((tp + fp) > 0).numpy()[::-1]  # thresholds above every score give no precision
+            ap = self._step_ap(r_curve[keep], p_curve[keep]) if keep.any() else 0.0
+            tpk, fpk = float(tp[k]) if k < self.nbins else 0.0, float(fp[k]) if k < self.nbins else 0.0
+            p = tpk / (tpk + fpk) if tpk + fpk else 0.0
+            r = tpk / npos
+            f1 = 2 * p * r / (p + r) if p + r else 0.0
+            rows.append((p, r, f1, ap))
+        if not rows:
+            return {"p": 0.0, "r": 0.0, "f1": 0.0, "ap": 0.0}
+        p, r, f1, ap = np.array(rows).mean(0).tolist()
+        return {"p": p, "r": r, "f1": f1, "ap": ap}
+
+    def process(self) -> None:
+        """Compute all metrics from the accumulated counts."""
+        if self.hist is None:
+            return
+        self.level_stats = [self._stats(h) for h in self.hist]
+        self.fused_stats = self._stats(self.hist_fused)
+        self.p, self.r, self.f1, self.ap = (float(np.mean([s[k] for s in self.level_stats])) for k in "p r f1 ap".split())
+        self.ap_fused = self.fused_stats["ap"]
+
+        def iou(a):
+            """Mean IoU over level pairs; pairs where neither map has a positive cell are undefined and skipped."""
+            vals = [i / u for i, u in a.tolist() if u]
+            return float(np.mean(vals)) if vals else float("nan")
+
+        self.level_agree, self.level_agree_gt = iou(self.agree), iou(self.agree_gt)
+
+    @property
+    def fitness(self) -> float:
+        """Return the cell-level AP averaged over levels, used to select the best model."""
+        return self.ap
+
+    @property
+    def keys(self) -> List[str]:
+        """Return a list of keys for the results_dict property."""
+        return [
+            "metrics/precision",
+            "metrics/recall",
+            "metrics/F1",
+            "metrics/AP",
+            "metrics/AP_fused",
+            "metrics/level_agree",
+            "metrics/level_agree_gt",
+        ]
+
+    @property
+    def results_dict(self) -> Dict[str, float]:
+        """Return a dictionary with the metrics and the fitness score."""
+        values = [self.p, self.r, self.f1, self.ap, self.ap_fused, self.level_agree, self.level_agree_gt]
+        return dict(zip(self.keys + ["fitness"], values + [self.fitness]))
+
+    @property
+    def curves(self) -> List:
+        """Return a list of curves for accessing specific metrics curves."""
+        return []
+
+    @property
+    def curves_results(self) -> List:
+        """Return a list of curves for accessing specific metrics curves."""
+        return []
+
+    def summary(self, normalize: bool = True, decimals: int = 5) -> List[Dict[str, Union[str, float]]]:
+        """Return one row per level plus one for the fused map, with precision, recall, F1 and AP."""
+        rows = [("all", {"p": self.p, "r": self.r, "f1": self.f1, "ap": self.ap})]
+        rows += list(zip(self.level_names, self.level_stats)) + [("fused", self.fused_stats)]
+        return [
+            {"Level": n, **{k.upper(): round(v, decimals) for k, v in s.items()}} for n, s in rows
+        ]
 
 
 class OBBMetrics(DetMetrics):

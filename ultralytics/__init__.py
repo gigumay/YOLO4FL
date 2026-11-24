@@ -20,7 +20,7 @@ __all__ = (
     "__version__",
     "ASSETS",
     "YOLO",
-    "DetectionModel"
+    "DetectionModel",
     "YOLOWorld",
     "YOLOE",
     "NAS",

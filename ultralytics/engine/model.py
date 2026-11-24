@@ -1061,6 +1061,8 @@ class Model(torch.nn.Module):
             {'imgsz': 640, 'data': 'coco.yaml', 'task': 'detect'}
         """
         include = {"imgsz", "data", "task", "single_cls"}  # only remember these arguments when loading a PyTorch model
+        if args.get("task") == "presence":  # pres_* define the targets and the metrics, so val/predict must reuse them
+            include |= {k for k in args if k.startswith("pres_")}
         return {k: v for k, v in args.items() if k in include}
 
     # def __getattr__(self, attr):

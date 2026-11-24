@@ -101,6 +101,12 @@ cls: 0.5 # (float) cls loss gain (scale with pixels)
 dfl: 1.5 # (float) dfl loss gain
 pose: 12.0 # (float) pose loss gain
 kobj: 1.0 # (float) keypoint obj loss gain
+pres_tau: 0.15 # (float) presence target: a cell is positive if it holds >= pres_tau of a box OR a box covers >= pres_tau of it; cells a box touches less are ignored (no loss, not scored)
+pres_norm: 0.0 # (float) presence loss divisor: 0 = positive cells in the batch; > 0 = batch * pres_norm, same value at every FL client (e.g. mean positive cells per image)
+pres_alpha: 0.25 # (float) presence focal loss alpha: weight of positive cells, negatives get 1 - alpha (0.5 weighs both equally)
+pres_gamma: 2.0 # (float) presence focal loss gamma (0 is plain BCE)
+pres_inst_pow: 0.0 # (float) presence loss: positive cells of a box weigh 1 / n**pres_inst_pow, n = cells it marks on that level (0 off, 0.5 1/sqrt(n), 1 1/n)
+pres_conf: 0.5 # (float) presence score at or above which a cell counts as flagged (val precision/recall/F1, level agreement, results summary)
 nbs: 64 # (int) nominal batch size
 hsv_h: 0.015 # (float) image HSV-Hue augmentation (fraction)
 hsv_s: 0.7 # (float) image HSV-Saturation augmentation (fraction)

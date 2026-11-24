@@ -5,10 +5,18 @@ from typing import Any, Dict, List, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torchvision.ops import sigmoid_focal_loss
 
 from ultralytics.utils.metrics import OKS_SIGMA
 from ultralytics.utils.ops import crop_mask, xywh2xyxy, xyxy2xywh
-from ultralytics.utils.tal import RotatedTaskAlignedAssigner, TaskAlignedAssigner, dist2bbox, dist2rbox, make_anchors
+from ultralytics.utils.tal import (
+    RotatedTaskAlignedAssigner,
+    TaskAlignedAssigner,
+    dist2bbox,
+    dist2rbox,
+    make_anchors,
+    presence_batch_targets,
+)
 from ultralytics.utils.torch_utils import autocast
 
 from .metrics import bbox_iou, probiou
@@ -640,6 +648,73 @@ class v8PoseLoss(v8DetectionLoss):
                 kpts_obj_loss = self.bce_pose(pred_kpt[..., 2], kpt_mask.float())  # keypoint obj loss
 
         return kpts_loss, kpts_obj_loss
+
+
+class v8PresenceLoss:
+    """
+    Criterion for the presence task.
+
+    Builds per-level region targets and per-cell weights from the ground-truth boxes (see `presence_targets`) and
+    compares them with the per-level presence logits using sigmoid focal loss (`pres_alpha`, `pres_gamma`). Each
+    cell's loss is multiplied by its weight, so the cells that a box only partly covers (weight 0) add nothing, and
+    the result is summed over all cells of all levels. The sum is then divided by:
+
+    - `pres_norm` = 0 (default): the summed weight of the positive cells in the batch, at least 1, as in RetinaNet.
+      This is the number of positive cells unless `pres_inst_pow` > 0. The scale of the loss then depends on how many
+      animals the batch happens to hold.
+    - `pres_norm` > 0: batch size * `pres_norm`. The loss of a batch is then the mean of per-image losses that do not
+      depend on the other images in the batch, which is what federated training needs. Use the same value at every
+      client, e.g. the mean number of positive cells per training image across all clients.
+    """
+
+    def __init__(self, model):  # model must be de-paralleled
+        """Initialize v8PresenceLoss from the model's Presence head and hyperparameters."""
+        m = model.model[-1]  # Presence() module
+        h = model.args  # dict when loaded from a checkpoint, IterableSimpleNamespace in the trainer
+        get = h.get if hasattr(h, "get") else lambda k, d: getattr(h, k, d)
+        self.tau = get("pres_tau", 0.3)
+        self.norm = float(get("pres_norm", 0.0))
+        self.alpha = get("pres_alpha", 0.25)
+        self.gamma = get("pres_gamma", 2.0)
+        self.inst_pow = get("pres_inst_pow", 0.0)
+        assert self.norm >= 0, f"pres_norm must be >= 0, got {self.norm}"
+        self.stride = m.stride
+        self.nc = m.nc
+
+    def __call__(self, preds: Any, batch: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Compute the presence loss.
+
+        Args:
+            preds (List[torch.Tensor] | Tuple): Per-level logits (B, nc, H_i, W_i), or the (probs, logits) eval tuple.
+            batch (Dict[str, torch.Tensor]): Batch with 'bboxes' (N, 4) normalized xywh, 'cls' (N, 1) and
+                'batch_idx' (N,), where N is the number of boxes across the whole batch.
+
+        Returns:
+            (Tuple[torch.Tensor, torch.Tensor]): (loss * batch_size, detached loss), like the other YOLO losses.
+        """
+        feats = preds[1] if isinstance(preds, tuple) else preds  # per-level logits
+        bs = feats[0].shape[0]
+        targets, weights = presence_batch_targets(
+            batch,
+            bs,
+            [tuple(f.shape[2:]) for f in feats],
+            self.stride.tolist(),
+            self.nc,
+            self.tau,
+            self.inst_pow,
+            device=feats[0].device,
+        )
+        loss = sum(
+            (sigmoid_focal_loss(f.float(), t, alpha=self.alpha, gamma=self.gamma, reduction="none") * w).sum()
+            for f, t, w in zip(feats, targets, weights)
+        )
+        if self.norm > 0:  # fixed divisor, identical for every batch and every client
+            loss = loss / (bs * self.norm)
+        else:  # summed weight of the positive cells in this batch
+            loss = loss / sum((t * w).sum() for t, w in zip(targets, weights)).clamp(min=1.0)
+        loss = loss.view(1)
+        return loss * bs, loss.detach()
 
 
 class v8ClassificationLoss:

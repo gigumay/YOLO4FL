@@ -11,6 +11,7 @@ from ultralytics.nn.tasks import (
     DetectionModel,
     OBBModel,
     PoseModel,
+    PresenceModel,
     SegmentationModel,
     WorldModel,
     YOLOEModel,
@@ -117,6 +118,12 @@ class YOLO(Model):
                 "trainer": yolo.obb.OBBTrainer,
                 "validator": yolo.obb.OBBValidator,
                 "predictor": yolo.obb.OBBPredictor,
+            },
+            "presence": {
+                "model": PresenceModel,
+                "trainer": yolo.presence.PresenceTrainer,
+                "validator": yolo.presence.PresenceValidator,
+                "predictor": yolo.presence.PresencePredictor,
             },
         }
 

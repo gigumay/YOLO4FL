@@ -174,3 +174,8 @@ pnnx*
 
 # calibration image
 calibration_*.npy
+
+# Claude files
+/presence_fusion_handover.md
+/presence_handover.md
+/presence_task.diff

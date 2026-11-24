@@ -18,7 +18,18 @@ from .conv import Conv, DWConv
 from .transformer import MLP, DeformableTransformerDecoder, DeformableTransformerDecoderLayer
 from .utils import bias_init_with_prob, linear_init
 
-__all__ = "Detect", "Segment", "Pose", "Classify", "OBB", "RTDETRDecoder", "v10Detect", "YOLOEDetect", "YOLOESegment"
+__all__ = (
+    "Detect",
+    "Segment",
+    "Pose",
+    "Classify",
+    "OBB",
+    "RTDETRDecoder",
+    "v10Detect",
+    "YOLOEDetect",
+    "YOLOESegment",
+    "Presence",
+)
 
 
 class Detect(nn.Module):
@@ -1224,3 +1235,69 @@ class v10Detect(Detect):
     def fuse(self):
         """Remove the one2many head for inference optimization."""
         self.cv2 = self.cv3 = nn.ModuleList([nn.Identity()] * self.nl)
+
+
+class Presence(nn.Module):
+    """
+    YOLO presence head: one presence heatmap per feature level, no box regression.
+
+    Every grid cell of every input level gets a score per class for "an object is present in this cell". The head
+    replaces Detect, so the model never learns box size. Each level's branch is an exact copy of Detect's
+    (non-legacy) classification branch, under the same attribute name `cv3`, so that pretrained detection weights
+    for that branch transfer wherever the shapes match.
+
+    Attributes:
+        nc (int): Number of classes (output channels per level).
+        nl (int): Number of input feature levels.
+        stride (torch.Tensor): Stride of each level, computed when the model is built.
+        cv3 (nn.ModuleList): One convolutional branch per level, producing `nc` logits per cell.
+
+    Examples:
+        >>> head = Presence(nc=1, ch=(256, 512, 1024))
+        >>> x = [torch.randn(1, 256, 80, 80), torch.randn(1, 512, 40, 40), torch.randn(1, 1024, 20, 20)]
+        >>> logits = head(x)  # training mode: list of (1, 1, 80, 80), (1, 1, 40, 40), (1, 1, 20, 20)
+    """
+
+    export = False  # export mode
+
+    def __init__(self, nc: int = 80, ch: Tuple = ()):
+        """
+        Initialize the presence head.
+
+        Args:
+            nc (int): Number of classes.
+            ch (tuple): Channel sizes of the input feature maps, one per level.
+        """
+        super().__init__()
+        self.nc = nc
+        self.nl = len(ch)
+        self.stride = torch.zeros(self.nl)  # strides computed during build
+        c3 = max(ch[0], min(self.nc, 100))  # channels, as in Detect's classification branch
+        self.cv3 = nn.ModuleList(
+            nn.Sequential(
+                nn.Sequential(DWConv(x, x, 3), Conv(x, c3, 1)),
+                nn.Sequential(DWConv(c3, c3, 3), Conv(c3, c3, 1)),
+                nn.Conv2d(c3, self.nc, 1),
+            )
+            for x in ch
+        )
+
+    def forward(self, x: List[torch.Tensor]) -> Union[List[torch.Tensor], Tuple]:
+        """
+        Compute the per-level presence maps.
+
+        Returns:
+            Training: list of logits, one (B, nc, H_i, W_i) tensor per level.
+            Export: list of probabilities (sigmoid of the logits).
+            Otherwise: tuple (probabilities, logits), so the loss can be computed from evaluation outputs.
+        """
+        logits = [self.cv3[i](x[i]) for i in range(self.nl)]
+        if self.training:
+            return logits
+        probs = [xi.sigmoid() for xi in logits]
+        return probs if self.export else (probs, logits)
+
+    def bias_init(self, prior_prob: float = 0.01):
+        """Initialize the output biases to a low prior probability of presence, so early training is stable."""
+        for b in self.cv3:
+            b[-1].bias.data[:] = bias_init_with_prob(prior_prob)

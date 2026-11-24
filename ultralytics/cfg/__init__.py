@@ -48,13 +48,14 @@ SOLUTION_MAP = {
 
 # Define valid tasks and modes
 MODES = frozenset({"train", "val", "predict", "export", "track", "benchmark"})
-TASKS = frozenset({"detect", "segment", "classify", "pose", "obb"})
+TASKS = frozenset({"detect", "segment", "classify", "pose", "obb", "presence"})
 TASK2DATA = {
     "detect": "coco8.yaml",
     "segment": "coco8-seg.yaml",
     "classify": "imagenet10",
     "pose": "coco8-pose.yaml",
     "obb": "dota8.yaml",
+    "presence": "coco8.yaml",
 }
 TASK2MODEL = {
     "detect": "yolo11n.pt",
@@ -62,6 +63,7 @@ TASK2MODEL = {
     "classify": "yolo11n-cls.pt",
     "pose": "yolo11n-pose.pt",
     "obb": "yolo11n-obb.pt",
+    "presence": "yolo11n-presence.yaml",
 }
 TASK2METRIC = {
     "detect": "metrics/mAP50-95(B)",
@@ -69,6 +71,7 @@ TASK2METRIC = {
     "classify": "metrics/accuracy_top1",
     "pose": "metrics/mAP50-95(P)",
     "obb": "metrics/mAP50-95(B)",
+    "presence": "metrics/AP",
 }
 
 ARGV = sys.argv or ["", ""]  # sometimes sys.argv = []
@@ -154,6 +157,8 @@ CFG_FLOAT_KEYS = frozenset(
         "time",
         "workspace",
         "batch",
+        "pres_norm",
+        "pres_gamma",
     }
 )
 CFG_FRACTION_KEYS = frozenset(
@@ -181,6 +186,10 @@ CFG_FRACTION_KEYS = frozenset(
         "conf",
         "iou",
         "fraction",
+        "pres_tau",
+        "pres_alpha",
+        "pres_inst_pow",
+        "pres_conf",
     }
 )
 CFG_INT_KEYS = frozenset(

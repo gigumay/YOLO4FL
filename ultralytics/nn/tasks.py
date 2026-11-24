@@ -55,6 +55,7 @@ from ultralytics.nn.modules import (
     Index,
     LRPCHead,
     Pose,
+    Presence,
     RepC3,
     RepConv,
     RepNCSPELAN4,
@@ -77,6 +78,7 @@ from ultralytics.utils.loss import (
     v8DetectionLoss,
     v8OBBLoss,
     v8PoseLoss,
+    v8PresenceLoss,
     v8SegmentationLoss,
 )
 from ultralytics.utils.ops import make_divisible
@@ -297,6 +299,8 @@ class BaseModel(torch.nn.Module):
             m.stride = fn(m.stride)
             m.anchors = fn(m.anchors)
             m.strides = fn(m.strides)
+        elif isinstance(m, Presence):  # stride is a plain tensor attribute, not moved/cast by nn.Module._apply
+            m.stride = fn(m.stride)
         return self
 
     def load(self, weights, verbose=True):
@@ -404,7 +408,8 @@ class DetectionModel(BaseModel):
 
         # Build strides
         m = self.model[-1]  # Detect()
-        if isinstance(m, Detect):  # includes all Detect subclasses like Segment, Pose, OBB, YOLOEDetect, YOLOESegment
+        # includes all Detect subclasses like Segment, Pose, OBB, YOLOEDetect, YOLOESegment, plus the Presence head
+        if isinstance(m, (Detect, Presence)):
             s = 256  # 2x min stride
             m.inplace = self.inplace
 
@@ -610,6 +615,35 @@ class PoseModel(DetectionModel):
     def init_criterion(self):
         """Initialize the loss criterion for the PoseModel."""
         return v8PoseLoss(self)
+
+
+class PresenceModel(DetectionModel):
+    """
+    YOLO presence model.
+
+    Same backbone and neck as the detection model, but the last layer is a Presence head: one heatmap per feature
+    level that scores whether an object is present in each grid cell. No boxes are predicted.
+
+    Examples:
+        >>> model = PresenceModel("yolo11n-presence.yaml", ch=3, nc=1)
+        >>> probs, logits = model.eval()(torch.zeros(1, 3, 640, 640))  # one map per level
+    """
+
+    def __init__(self, cfg="yolo11n-presence.yaml", ch=3, nc=None, verbose=True):
+        """
+        Initialize the YOLO presence model.
+
+        Args:
+            cfg (str | dict): Model configuration file path or dictionary.
+            ch (int): Number of input channels.
+            nc (int, optional): Number of classes.
+            verbose (bool): Whether to display model information.
+        """
+        super().__init__(cfg=cfg, ch=ch, nc=nc, verbose=verbose)
+
+    def init_criterion(self):
+        """Initialize the loss criterion for the PresenceModel."""
+        return v8PresenceLoss(self)
 
 
 class ClassificationModel(BaseModel):
@@ -1715,7 +1749,7 @@ def parse_model(d, ch, verbose=True):
         elif m is Concat:
             c2 = sum(ch[x] for x in f)
         elif m in frozenset(
-            {Detect, WorldDetect, YOLOEDetect, Segment, YOLOESegment, Pose, OBB, ImagePoolingAttn, v10Detect}
+            {Detect, WorldDetect, YOLOEDetect, Segment, YOLOESegment, Pose, OBB, ImagePoolingAttn, v10Detect, Presence}
         ):
             args.append([ch[x] for x in f])
             if m is Segment or m is YOLOESegment:
@@ -1807,6 +1841,8 @@ def guess_model_task(model):
         m = cfg["head"][-1][-2].lower()  # output module name
         if m in {"classify", "classifier", "cls", "fc"}:
             return "classify"
+        if m == "presence":
+            return "presence"
         if "detect" in m:
             return "detect"
         if "segment" in m:
@@ -1837,6 +1873,8 @@ def guess_model_task(model):
                 return "pose"
             elif isinstance(m, OBB):
                 return "obb"
+            elif isinstance(m, Presence):
+                return "presence"
             elif isinstance(m, (Detect, WorldDetect, YOLOEDetect, v10Detect)):
                 return "detect"
 
@@ -1851,6 +1889,8 @@ def guess_model_task(model):
             return "pose"
         elif "-obb" in model.stem or "obb" in model.parts:
             return "obb"
+        elif "-presence" in model.stem or "presence" in model.parts:
+            return "presence"
         elif "detect" in model.parts:
             return "detect"
 
