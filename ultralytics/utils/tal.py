@@ -420,6 +420,9 @@ def dist2rbox(pred_dist, pred_angle, anchor_points, dim=-1):
     return torch.cat([xy, lt + rb], dim=dim)
 
 
+PRESENCE_FP_CLS = -1  # class id of false-positive region boxes in a presence batch (see PresenceDataset)
+
+
 def presence_targets(gt_xyxy, gt_cls, batch_idx, bs, shapes, strides, nc, tau=0.3, inst_pow=0.0, chunk=256):
     """
     Build the per-level presence targets and per-cell loss weights from ground-truth boxes.
@@ -496,9 +499,52 @@ def presence_targets(gt_xyxy, gt_cls, batch_idx, bs, shapes, strides, nc, tau=0.
     return targets, weights
 
 
-def presence_batch_targets(batch, bs, shapes, strides, nc, tau=0.3, inst_pow=0.0, device=None):
+def presence_fp_masks(fp_xyxy, batch_idx, bs, shapes, strides, chunk=256):
+    """
+    Build per-level masks of the cells that false-positive regions touch.
+
+    A cell is marked if any false-positive box of its image overlaps it at all (I > 0), however little: a region
+    where a box model made a false detection holds no animal, so every cell it touches is a genuine negative. The
+    masks have a single class channel and apply to every class. They are only used to raise the loss weight of
+    negative cells (see `presence_batch_targets`) and never create targets.
+
+    Args:
+        fp_xyxy (torch.Tensor): False-positive boxes in input-image pixels, xyxy, shape (M, 4).
+        batch_idx (torch.Tensor): Index of the image each box belongs to, shape (M,).
+        bs (int): Batch size.
+        shapes (List[Tuple[int, int]]): Grid size (h, w) of each level.
+        strides (List[float]): Stride of each level in pixels.
+        chunk (int): Max number of boxes processed at once, see `presence_targets`.
+
+    Returns:
+        (List[torch.Tensor]): One (bs, 1, h, w) boolean mask per level.
+    """
+    device = fp_xyxy.device
+    fp_xyxy = fp_xyxy.float().view(-1, 4)
+    bi = batch_idx.view(-1).long()
+    masks = []
+    for (h, w), s in zip(shapes, strides):
+        s = float(s)
+        m = torch.zeros(bs, h, w, device=device)  # number of false-positive boxes that touch each cell
+        x0 = torch.arange(w, device=device, dtype=torch.float32) * s  # left edge of each cell column
+        y0 = torch.arange(h, device=device, dtype=torch.float32) * s  # top edge of each cell row
+        for i in range(0, len(fp_xyxy), chunk):
+            b = fp_xyxy[i : i + chunk]
+            ox = (torch.minimum(b[:, 2:3], x0 + s) - torch.maximum(b[:, 0:1], x0)) > 0  # (n, w)
+            oy = (torch.minimum(b[:, 3:4], y0 + s) - torch.maximum(b[:, 1:2], y0)) > 0  # (n, h)
+            m.index_put_((bi[i : i + chunk],), (oy[:, :, None] & ox[:, None, :]).float(), accumulate=True)
+        masks.append((m > 0).unsqueeze(1))
+    return masks
+
+
+def presence_batch_targets(batch, bs, shapes, strides, nc, tau=0.3, inst_pow=0.0, fp_weight=1.0, device=None):
     """
     Return the presence targets and loss weights of a dataloader batch, building them at most once per batch.
+
+    Boxes of class `PRESENCE_FP_CLS` (-1) are false-positive regions (see `PresenceDataset`), not animals: they never
+    become targets. With `fp_weight != 1`, the negative cells they touch (see `presence_fp_masks`) weigh `fp_weight`
+    instead of 1. Positive and ignored cells keep their weight, so for `fp_weight > 0` the cells with weight > 0,
+    which the validator scores, are the same as without false-positive regions.
 
     During validation in training, the loss and the metrics both need the targets of the same batch. The result is
     therefore cached in `batch["presence_targets"]` together with the arguments it was built from, and reused when a
@@ -506,13 +552,14 @@ def presence_batch_targets(batch, bs, shapes, strides, nc, tau=0.3, inst_pow=0.0
 
     Args:
         batch (Dict[str, torch.Tensor]): Batch with 'bboxes' (N, 4) normalized xywh, 'cls' (N, 1) and 'batch_idx'
-            (N,), where N is the number of boxes across the whole batch.
+            (N,), where N is the number of boxes across the whole batch, false-positive regions included.
         bs (int): Batch size.
         shapes (List[Tuple[int, int]]): Grid size (h, w) of each level.
         strides (List[float]): Stride of each level in pixels. The network input size is shapes[0] * strides[0].
         nc (int): Number of classes.
         tau (float): Overlap threshold, see `presence_targets`.
         inst_pow (float): Exponent of the per-box weight of positive cells, see `presence_targets`.
+        fp_weight (float): Loss weight of the negative cells that a false-positive region touches (1 = no change).
         device (torch.device, optional): Device of the result. Defaults to the device of `batch["bboxes"]`.
 
     Returns:
@@ -521,15 +568,22 @@ def presence_batch_targets(batch, bs, shapes, strides, nc, tau=0.3, inst_pow=0.0
     device = torch.device(device) if device is not None else batch["bboxes"].device
     shapes = [(int(h), int(w)) for h, w in shapes]
     strides = [float(s) for s in strides]
-    key = (tuple(shapes), tuple(strides), bs, nc, float(tau), float(inst_pow), str(device))
+    key = (tuple(shapes), tuple(strides), bs, nc, float(tau), float(inst_pow), float(fp_weight), str(device))
     cached = batch.get("presence_targets")
     if cached is not None and cached[0] == key:
         return cached[1]
     h, w = shapes[0][0] * strides[0], shapes[0][1] * strides[0]  # network input size in pixels
-    gt_xyxy = xywh2xyxy(batch["bboxes"].to(device).float() * torch.tensor([w, h, w, h], device=device))
-    out = presence_targets(
-        gt_xyxy, batch["cls"].to(device), batch["batch_idx"].to(device), bs, shapes, strides, nc, tau, inst_pow
-    )
+    xyxy = xywh2xyxy(batch["bboxes"].to(device).float() * torch.tensor([w, h, w, h], device=device))
+    cls, bi = batch["cls"].to(device).view(-1), batch["batch_idx"].to(device).view(-1)
+    fp = cls < 0  # false-positive regions (PRESENCE_FP_CLS); a negative class would also index the wrong channel
+    targets, weights = presence_targets(xyxy[~fp], cls[~fp], bi[~fp], bs, shapes, strides, nc, tau, inst_pow)
+    if fp_weight != 1 and fp.any():
+        masks = presence_fp_masks(xyxy[fp], bi[fp], bs, shapes, strides)
+        weights = [
+            torch.where(m & (t == 0) & (wt > 0), wt * fp_weight, wt)  # negative cells only
+            for t, wt, m in zip(targets, weights, masks)
+        ]
+    out = (targets, weights)
     batch["presence_targets"] = (key, out)
     return out
 

@@ -665,6 +665,11 @@ class v8PresenceLoss:
     - `pres_norm` > 0: batch size * `pres_norm`. The loss of a batch is then the mean of per-image losses that do not
       depend on the other images in the batch, which is what federated training needs. Use the same value at every
       client, e.g. the mean number of positive cells per training image across all clients.
+
+    Boxes of class -1 are false-positive regions, read from `<label>_fp.txt` files by `PresenceDataset` when
+    `pres_fp_weight` != 1. They never become targets. The negative cells they touch weigh `pres_fp_weight` instead
+    of 1 (see `presence_batch_targets`), which adds loss where a box model made false detections; the divisor above
+    does not change.
     """
 
     def __init__(self, model):  # model must be de-paralleled
@@ -677,7 +682,9 @@ class v8PresenceLoss:
         self.alpha = get("pres_alpha", 0.25)
         self.gamma = get("pres_gamma", 2.0)
         self.inst_pow = get("pres_inst_pow", 0.0)
+        self.fp_weight = float(get("pres_fp_weight", 1.0))
         assert self.norm >= 0, f"pres_norm must be >= 0, got {self.norm}"
+        assert self.fp_weight > 0, f"pres_fp_weight must be > 0, got {self.fp_weight}"
         self.stride = m.stride
         self.nc = m.nc
 
@@ -688,7 +695,8 @@ class v8PresenceLoss:
         Args:
             preds (List[torch.Tensor] | Tuple): Per-level logits (B, nc, H_i, W_i), or the (probs, logits) eval tuple.
             batch (Dict[str, torch.Tensor]): Batch with 'bboxes' (N, 4) normalized xywh, 'cls' (N, 1) and
-                'batch_idx' (N,), where N is the number of boxes across the whole batch.
+                'batch_idx' (N,), where N is the number of boxes across the whole batch. Rows of class -1 are
+                false-positive regions.
 
         Returns:
             (Tuple[torch.Tensor, torch.Tensor]): (loss * batch_size, detached loss), like the other YOLO losses.
@@ -703,6 +711,7 @@ class v8PresenceLoss:
             self.nc,
             self.tau,
             self.inst_pow,
+            fp_weight=self.fp_weight,
             device=feats[0].device,
         )
         loss = sum(

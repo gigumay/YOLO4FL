@@ -15,7 +15,10 @@ class PresenceTrainer(DetectionTrainer):
     Trainer for the presence task.
 
     Everything data-related is inherited from DetectionTrainer: the dataset still holds the usual YOLO box labels, and
-    the presence targets are derived from them on the fly inside the loss.
+    the presence targets are derived from them on the fly inside the loss. With `pres_fp_weight` != 1 the dataset
+    (PresenceDataset, chosen by `build_yolo_dataset` for this task) also reads optional `<label>_fp.txt` files of
+    false-positive regions, whose negative cells the loss weighs by `pres_fp_weight`. They travel through the batch as
+    boxes of class -1, which is how they appear in train_batch*.jpg, and are counted in the progress bar's Instances.
 
     Examples:
         >>> from ultralytics.models.yolo.presence import PresenceTrainer

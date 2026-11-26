@@ -106,6 +106,7 @@ pres_norm: 0.0 # (float) presence loss divisor: 0 = positive cells in the batch;
 pres_alpha: 0.25 # (float) presence focal loss alpha: weight of positive cells, negatives get 1 - alpha (0.5 weighs both equally)
 pres_gamma: 2.0 # (float) presence focal loss gamma (0 is plain BCE)
 pres_inst_pow: 0.0 # (float) presence loss: positive cells of a box weigh 1 / n**pres_inst_pow, n = cells it marks on that level (0 off, 0.5 1/sqrt(n), 1 1/n)
+pres_fp_weight: 1.0 # (float) presence loss: negative cells touched by a false-positive box (<label>_fp.txt next to each label file, e.g. box-model false detections) weigh pres_fp_weight instead of 1 (> 0; 1 = off, files not read)
 pres_conf: 0.5 # (float) presence score at or above which a cell counts as flagged (val precision/recall/F1, level agreement, results summary)
 nbs: 64 # (int) nominal batch size
 hsv_h: 0.015 # (float) image HSV-Hue augmentation (fraction)

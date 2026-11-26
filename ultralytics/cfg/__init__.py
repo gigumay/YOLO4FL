@@ -159,6 +159,7 @@ CFG_FLOAT_KEYS = frozenset(
         "batch",
         "pres_norm",
         "pres_gamma",
+        "pres_fp_weight",
     }
 )
 CFG_FRACTION_KEYS = frozenset(

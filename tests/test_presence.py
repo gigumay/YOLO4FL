@@ -1,22 +1,28 @@
 # Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
 """Tests for the presence task: targets, loss normalisation, cell metrics, checkpoint args and results."""
 
+import functools
 import json
 import math
+from types import SimpleNamespace
 
+import cv2
 import numpy as np
 import pytest
 import torch
 from torchvision.ops import sigmoid_focal_loss
 
 from ultralytics.cfg import check_cfg, get_cfg
+from ultralytics.data.dataset import PresenceDataset
+from ultralytics.data.utils import load_dataset_cache_file
 from ultralytics.engine.model import Model
-from ultralytics.models.yolo.presence import PresenceResults
+from ultralytics.models.yolo.presence import PresenceResults, PresenceValidator
+from ultralytics.models.yolo.presence import val as presence_val
 from ultralytics.nn.tasks import PresenceModel
 from ultralytics.utils.loss import v8PresenceLoss
 from ultralytics.utils.metrics import PresenceMetrics
-from ultralytics.utils.plotting import overlay_heatmap
-from ultralytics.utils.tal import presence_batch_targets, presence_targets
+from ultralytics.utils.plotting import overlay_heatmap, plot_images
+from ultralytics.utils.tal import presence_batch_targets, presence_fp_masks, presence_targets
 
 STRIDES = [8, 16, 32]
 SHAPES_64 = [(8, 8), (4, 4), (2, 2)]  # level grids of a 64x64 input
@@ -78,12 +84,12 @@ def presence_model():
     return PresenceModel("yolo11n-presence.yaml", nc=1, verbose=False)
 
 
-def _loss(model, logits, boxes, batch_idx, **hyp):
-    """Return the presence loss (loss * batch size) for hand-made logits and normalized xywh boxes."""
+def _loss(model, logits, boxes, batch_idx, cls=None, **hyp):
+    """Return the presence loss (loss * batch size) for hand-made logits and normalized xywh boxes (class 0 default)."""
     model.args = {"pres_tau": 0.3, **hyp}
     batch = {
         "bboxes": torch.tensor(boxes, dtype=torch.float32).view(-1, 4),
-        "cls": torch.zeros(len(boxes), 1),
+        "cls": torch.zeros(len(boxes), 1) if cls is None else torch.tensor(cls, dtype=torch.float32).view(-1, 1),
         "batch_idx": torch.tensor(batch_idx, dtype=torch.float32),
     }
     return v8PresenceLoss(model)(logits, batch)[0]
@@ -154,6 +160,43 @@ def test_metrics_skip_ignored_cells():
     assert m.p == m.r == m.ap == 1.0
 
 
+def test_most_accurate_map():
+    """With labels the map that best covers the positive cells wins, ignored cells aside; without, the quietest."""
+    t_fine, t_coarse = torch.zeros(2, 1, 4, 4), torch.zeros(2, 1, 2, 2)
+    t_fine[0, 0, 1, 1] = t_coarse[0, 0, 0, 0] = 1  # image 0 has one animal, image 1 none
+    v_fine, v_coarse = torch.ones_like(t_fine, dtype=torch.bool), torch.ones_like(t_coarse, dtype=torch.bool)
+    v_fine[0, 0, 1, 2] = False  # an ignored cell next to the animal
+    fine = torch.full_like(t_fine, 0.01)
+    fine[0, 0, 1, 1] = fine[0, 0, 1, 2] = 0.9  # F1 0.88, or 0.61 if the ignored cell counted as a false alarm
+    fine[1, 0, 3, 3] = 0.9  # one false alarm: mean 0.066
+    coarse = torch.full_like(t_coarse, 0.05)
+    coarse[0, 0, 0, 0] = 0.7  # F1 0.76
+    coarse[1] = 0.03  # uniformly low: mean 0.03
+    best = PresenceValidator.most_accurate_map([fine, coarse], [t_fine, t_coarse], [v_fine, v_coarse])
+    assert best.tolist() == [0, 1]
+
+
+def test_plot_predictions_one_tile_per_image(tmp_path, monkeypatch):
+    """Validation plots write one labels and one prediction mosaic per batch, and nothing from plot_val_samples."""
+    monkeypatch.setattr(presence_val, "plot_images", functools.partial(plot_images, threaded=False))  # save now
+    validator = PresenceValidator(save_dir=tmp_path)
+    validator.init_metrics(SimpleNamespace(names={0: "animal"}))
+    batch = {
+        "img": torch.rand(3, 3, 64, 64),
+        "bboxes": torch.tensor([[0.25, 0.25, 0.2, 0.2]]),  # one animal in image 0, images 1 and 2 empty
+        "cls": torch.zeros(1, 1),
+        "batch_idx": torch.zeros(1),
+        "im_file": ["a.jpg", "b.jpg", "c.jpg"],
+    }
+    logits = [torch.randn(3, 1, h, w) for h, w in SHAPES_64]
+    preds = validator.postprocess(([x.sigmoid() for x in logits], logits))
+    validator.update_metrics(preds, batch)
+    validator.plot_val_samples(batch, 0)
+    assert not any(tmp_path.iterdir())
+    validator.plot_predictions(batch, preds, 0)
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["val_batch0_labels.jpg", "val_batch0_pred.jpg"]
+
+
 def test_reset_ckpt_args_keeps_presence_hyperparameters():
     """Loading a presence checkpoint keeps the pres_* arguments; other tasks drop them."""
     args = {"imgsz": 320, "data": "d.yaml", "task": "presence", "epochs": 3, "pres_tau": 0.5, "pres_conf": 0.4}
@@ -164,7 +207,14 @@ def test_reset_ckpt_args_keeps_presence_hyperparameters():
 
 def test_cfg_presence_keys():
     """The presence hyperparameters exist in the default config and are type-checked."""
-    hyp = {"pres_norm": 20, "pres_alpha": 0.5, "pres_gamma": 1, "pres_inst_pow": 0.5, "pres_conf": 0.3}
+    hyp = {
+        "pres_norm": 20,
+        "pres_alpha": 0.5,
+        "pres_gamma": 1,
+        "pres_inst_pow": 0.5,
+        "pres_conf": 0.3,
+        "pres_fp_weight": 4,
+    }
     cfg = get_cfg(overrides=hyp)
     assert all(getattr(cfg, k) == v for k, v in hyp.items())
     with pytest.raises(ValueError):
@@ -201,3 +251,124 @@ def test_overlay_heatmap_keeps_image_where_score_is_zero():
     img = np.random.default_rng(0).integers(0, 255, (40, 60, 3), dtype=np.uint8)
     assert np.array_equal(overlay_heatmap(img, np.zeros((5, 6), np.float16)), img)
     assert not np.array_equal(overlay_heatmap(img, torch.ones(5, 6)), img)
+
+
+ANIMAL, FP_FAR, FP_NEAR = [8, 8, 24, 24], [40, 40, 56, 56], [20, 8, 30, 24]  # xyxy pixels; FP_NEAR touches ANIMAL
+
+
+def _px_batch(boxes, cls, size=64):
+    """Return a one-image batch of boxes given in input pixels (xyxy), with their classes (-1: false-positive)."""
+    b = torch.tensor(boxes, dtype=torch.float32).view(-1, 4)
+    xywh = torch.cat([(b[:, :2] + b[:, 2:]) / 2, b[:, 2:] - b[:, :2]], 1) / size
+    return {"bboxes": xywh, "cls": torch.tensor(cls, dtype=torch.float32).view(-1, 1), "batch_idx": torch.zeros(len(b))}
+
+
+def test_fp_masks_mark_every_touched_cell():
+    """A false-positive box marks every cell it overlaps at all, on every level, but not the cells it only borders."""
+    boxes = torch.tensor([[100.0, 200.0, 124.0, 220.0], [0.0, 0.0, 8.0, 8.0]])  # one box in each of two images
+    masks = presence_fp_masks(boxes, torch.tensor([0.0, 1.0]), 2, [(80, 80), (40, 40), (20, 20)], STRIDES)
+    assert [tuple(m.shape) for m in masks] == [(2, 1, 80, 80), (2, 1, 40, 40), (2, 1, 20, 20)]
+    assert [int(m[0].sum()) for m in masks] == [12, 4, 1]  # 4x3 cells on P3, 2x2 on P4, 1 on P5
+    assert [int(m[1].sum()) for m in masks] == [1, 1, 1]  # ends on a cell edge: the next cell is untouched
+
+
+def test_batch_targets_fp_regions():
+    """False-positive boxes are no targets; they raise the weight of the negative cells they touch, and of no other."""
+    ref_targets, ref_weights = presence_batch_targets(_px_batch([ANIMAL], [0]), 1, SHAPES_64, STRIDES, 1)
+    batch = _px_batch([ANIMAL, FP_FAR, FP_NEAR], [0, -1, -1])
+    for fp_weight, raised in ((1.0, [0, 0, 0]), (3.0, [6, 4, 1])):
+        targets, weights = presence_batch_targets(batch, 1, SHAPES_64, STRIDES, 1, fp_weight=fp_weight)
+        assert all(torch.equal(t, t0) for t, t0 in zip(targets, ref_targets))
+        for w, w0, t0, n in zip(weights, ref_weights, ref_targets, raised):
+            changed = w != w0
+            assert changed.sum() == n
+            assert (w[changed] == fp_weight).all() and (w0[changed] == 1).all() and (t0[changed] == 0).all()
+    # FP_NEAR touches four P3 cells: two are the animal's (positive, weight kept at 1), two are negatives beside it
+    assert weights[0][0, 0, 1:3, 2].tolist() == [1.0, 1.0] and weights[0][0, 0, 1:3, 3].tolist() == [3.0, 3.0]
+
+
+def test_loss_fp_weight(presence_model):
+    """FP boxes change nothing at pres_fp_weight=1; otherwise their negative cells weigh more, over the same divisor."""
+    torch.manual_seed(0)
+    logits = [torch.randn(1, 1, h, w) for h, w in SHAPES_64]
+    animal, fp = [0.25, 0.25, 0.25, 0.25], [0.75, 0.75, 0.25, 0.25]  # ANIMAL and FP_FAR as normalized xywh
+    base = _loss(presence_model, logits, [animal], [0])
+    assert torch.allclose(_loss(presence_model, logits, [animal, fp], [0, 0], cls=[0, -1], pres_fp_weight=1.0), base)
+    loss = _loss(presence_model, logits, [animal, fp], [0, 0], cls=[0, -1], pres_fp_weight=3.0)
+    gt = torch.tensor([ANIMAL], dtype=torch.float32)
+    targets, weights = presence_targets(gt, torch.zeros(1), torch.zeros(1), 1, SHAPES_64, STRIDES, 1, tau=0.3)
+    masks = presence_fp_masks(torch.tensor([FP_FAR], dtype=torch.float32), torch.zeros(1), 1, SHAPES_64, STRIDES)
+    focal = sum(
+        (sigmoid_focal_loss(f, t, alpha=0.25, gamma=2.0, reduction="none") * w * (1 + 2 * (m & (t == 0)))).sum()
+        for f, t, w, m in zip(logits, targets, weights, masks)
+    )
+    assert torch.allclose(loss, focal / sum(t.sum() for t in targets))  # batch size 1, positive count unchanged
+    assert loss > base
+
+
+def test_validator_ignores_fp_regions(tmp_path):
+    """A false-positive box in a val batch changes neither the metrics nor the instance count."""
+    torch.manual_seed(0)
+    logits = [torch.randn(1, 1, h, w) for h, w in SHAPES_64]
+    stats, counts = [], []
+    for boxes, cls in (([ANIMAL], [0]), ([ANIMAL, FP_FAR], [0, -1])):
+        validator = PresenceValidator(save_dir=tmp_path, args={"pres_fp_weight": 3.0})
+        validator.init_metrics(SimpleNamespace(names={0: "animal"}))
+        batch = {"img": torch.zeros(1, 3, 64, 64), **_px_batch(boxes, cls)}
+        validator.update_metrics(validator.postprocess(([x.sigmoid() for x in logits], logits)), batch)
+        stats.append(validator.get_stats())
+        counts.append(validator.nt)
+    np.testing.assert_equal(stats[1], stats[0])
+    assert counts == [1, 1]
+
+
+def _write_tile(img_dir, name, label=None, fp=None, label_dir=None):
+    """Write a grey 64x64 jpg, and its label and false-positive label files if given, as YOLO dataset files."""
+    lbl_dir = img_dir if label_dir is None else img_dir.parent / label_dir / img_dir.name
+    for d in {img_dir, lbl_dir}:
+        d.mkdir(parents=True, exist_ok=True)
+    cv2.imwrite(str(img_dir / f"{name}.jpg"), np.full((64, 64, 3), 128, np.uint8))
+    for suffix, text in ((".txt", label), ("_fp.txt", fp)):
+        if text is not None:
+            (lbl_dir / f"{name}{suffix}").write_text(text)
+
+
+def _presence_dataset(img_dir, label_dir=None, augment=False, **hyp):
+    """Return the PresenceDataset of a folder of 64x64 images, built with the given hyperparameters."""
+    data = {"names": {0: "animal"}, "channels": 3, "label_dir": label_dir}
+    cfg = get_cfg(overrides=hyp)
+    return PresenceDataset(img_path=str(img_dir), imgsz=64, augment=augment, hyp=cfg, data=data, task="presence")
+
+
+def test_presence_dataset_reads_fp_files(tmp_path):
+    """Boxes of <label>_fp.txt come out as class -1 after the labels; bad files and pres_fp_weight=1 add none."""
+    img_dir = tmp_path / "train"
+    _write_tile(img_dir, "a", label="0 0.25 0.25 0.25 0.25\n", fp="0 0.75 0.75 0.25 0.25 0.9\n")  # with conf column
+    _write_tile(img_dir, "b", label="0 0.5 0.5 0.2 0.2\n", fp="0 0.5 0.5 0.1\n")  # malformed: ignored
+    _write_tile(img_dir, "c")  # no labels at all
+    a, b, c = (_presence_dataset(img_dir, pres_fp_weight=4.0)[i] for i in range(3))
+    assert a["cls"].view(-1).tolist() == [0, -1]
+    assert torch.allclose(a["bboxes"], torch.tensor([[0.25, 0.25, 0.25, 0.25], [0.75, 0.75, 0.25, 0.25]]))
+    assert b["cls"].view(-1).tolist() == [0] and len(c["cls"]) == 0
+    assert all("fp_bboxes" not in lb for lb in load_dataset_cache_file(tmp_path / "train.cache")["labels"])
+    assert _presence_dataset(img_dir, pres_fp_weight=1.0)[0]["cls"].view(-1).tolist() == [0]  # off: not read
+
+
+def test_presence_dataset_fp_files_follow_label_dir(tmp_path):
+    """With label_dir set, the false-positive file is read from beside the regular label file, not the image."""
+    img_dir = tmp_path / "train"
+    _write_tile(img_dir, "a", label="0 0.25 0.25 0.25 0.25\n", fp="0 0.75 0.75 0.25 0.25\n", label_dir="labels_x")
+    (img_dir / "a_fp.txt").write_text("0 0.5 0.5 0.5 0.5\n")  # beside the image: not read when label_dir is set
+    item = _presence_dataset(img_dir, label_dir="labels_x", pres_fp_weight=4.0)[0]
+    assert item["cls"].view(-1).tolist() == [0, -1]
+    assert torch.allclose(item["bboxes"][1], torch.tensor([0.75, 0.75, 0.25, 0.25]))
+
+
+def test_presence_dataset_fp_boxes_follow_augmentation(tmp_path):
+    """False-positive boxes go through the training augmentations like the animal boxes, here a certain flip."""
+    img_dir = tmp_path / "train"
+    _write_tile(img_dir, "a", label="0 0.25 0.25 0.25 0.25\n", fp="0 0.75 0.5 0.25 0.25\n")
+    still = dict(mosaic=0.0, degrees=0.0, translate=0.0, scale=0.0, shear=0.0, perspective=0.0, flipud=0.0)
+    item = _presence_dataset(img_dir, augment=True, fliplr=1.0, pres_fp_weight=4.0, **still)[0]  # always flips
+    assert item["cls"].view(-1).tolist() == [0, -1]
+    assert torch.allclose(item["bboxes"], torch.tensor([[0.75, 0.25, 0.25, 0.25], [0.25, 0.5, 0.25, 0.25]]))

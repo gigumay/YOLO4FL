@@ -13,9 +13,10 @@ import torch
 from PIL import Image
 from torch.utils.data import ConcatDataset
 
-from ultralytics.utils import LOCAL_RANK, LOGGER, NUM_THREADS, TQDM, colorstr
+from ultralytics.utils import DEFAULT_CFG, LOCAL_RANK, LOGGER, NUM_THREADS, TQDM, colorstr
 from ultralytics.utils.instance import Instances
 from ultralytics.utils.ops import resample_segments, segments2boxes
+from ultralytics.utils.tal import PRESENCE_FP_CLS
 from ultralytics.utils.torch_utils import TORCHVISION_0_18
 
 from .augment import (
@@ -312,6 +313,96 @@ class YOLODataset(BaseDataset):
             new_batch["batch_idx"][i] += i  # add target image index for build_targets()
         new_batch["batch_idx"] = torch.cat(new_batch["batch_idx"], 0)
         return new_batch
+
+
+class PresenceDataset(YOLODataset):
+    """
+    Dataset for the presence task: the usual YOLO box labels, plus optional false-positive regions.
+
+    The regular label files are read exactly as by YOLODataset (same paths, same *.cache file), and their boxes are
+    the only source of presence targets. With `pres_fp_weight` != 1, each image may also have a false-positive label
+    file next to its regular one, named like it with `_fp.txt` in place of `.txt` (following `label_dir`), e.g.
+    `train/tile.txt` and `train/tile_fp.txt`. It holds boxes in the YOLO format, `cls x y w h` normalized, optionally
+    followed by a confidence as written by `predict(save_txt=True, save_conf=True)`. The class and confidence are
+    ignored. The boxes mark regions where a box model made false detections, and the presence loss weighs the
+    negative cells they touch by `pres_fp_weight` (see `presence_batch_targets`).
+
+    When an image is loaded, its false-positive boxes are appended to its boxes with class `PRESENCE_FP_CLS` (-1), so
+    that every augmentation moves, clips and drops them exactly like the animal boxes. They are read after the label
+    cache and are not part of it, so the cache stays the one a detection dataset writes.
+
+    Attributes:
+        fp_weight (float): The `pres_fp_weight` hyperparameter.
+        use_fp (bool): Whether false-positive label files are read, i.e. `pres_fp_weight` != 1.
+
+    Examples:
+        >>> from ultralytics.cfg import get_cfg
+        >>> hyp = get_cfg(overrides={"pres_fp_weight": 4.0})
+        >>> dataset = PresenceDataset(img_path="path/to/images", data={"names": {0: "animal"}, "channels": 3}, hyp=hyp)
+    """
+
+    fp_suffix = "_fp.txt"  # replaces '.txt' at the end of an image's regular label path
+
+    def __init__(self, *args, **kwargs):
+        """Initialize the dataset; false-positive label files are only read if `pres_fp_weight` != 1."""
+        self.fp_weight = float(getattr(kwargs.get("hyp", DEFAULT_CFG), "pres_fp_weight", 1.0))
+        self.use_fp = self.fp_weight != 1  # set before super().__init__(), which calls get_labels()
+        super().__init__(*args, **kwargs)
+
+    def get_labels(self) -> List[Dict]:
+        """Return the regular labels (see YOLODataset.get_labels), each with its false-positive boxes if enabled."""
+        labels = super().get_labels()
+        if not self.use_fp:
+            return labels
+        label_files = img2label_paths([lb["im_file"] for lb in labels], self.data.get("label_dir"))
+        fp_files = [f[: -len(".txt")] + self.fp_suffix for f in label_files]
+        with ThreadPool(NUM_THREADS) as pool:
+            results = pool.map(self.load_fp_boxes, fp_files)
+        for lb, (boxes, _) in zip(labels, results):
+            lb["fp_bboxes"] = boxes
+        if msgs := [f"{self.prefix}{msg}" for _, msg in results if msg]:
+            LOGGER.warning("\n".join(msgs))
+        nf, nb = sum(len(b) > 0 for b, _ in results), sum(len(b) for b, _ in results)
+        log = LOGGER.warning if nf == 0 and self.augment else LOGGER.info  # none in the training set: misplaced?
+        log(
+            f"{self.prefix}pres_fp_weight={self.fp_weight:g}: {nf} of {len(labels)} images have false-positive "
+            f"regions ({nb} boxes in *{self.fp_suffix} files next to the labels)"
+        )
+        return labels
+
+    @staticmethod
+    def load_fp_boxes(path: str) -> Tuple[np.ndarray, str]:
+        """
+        Read the boxes of a false-positive label file.
+
+        Args:
+            path (str): Path of the file.
+
+        Returns:
+            boxes (np.ndarray): Normalized xywh boxes, shape (m, 4); empty if the file is missing, empty or invalid.
+            msg (str): Why an existing file was ignored, else "".
+        """
+        empty = np.zeros((0, 4), dtype=np.float32)
+        if not Path(path).is_file():
+            return empty, ""
+        try:
+            with open(path, encoding="utf-8") as f:
+                rows = [x.split() for x in f.read().strip().splitlines() if x.strip()]
+            assert all(len(x) in {5, 6} for x in rows), "rows need 5 columns (cls x y w h) or 6 (cls x y w h conf)"
+            boxes = np.array([x[1:5] for x in rows], dtype=np.float32).reshape(-1, 4)
+            assert ((boxes >= -0.01) & (boxes <= 1.01)).all(), "non-normalized or out of bounds coordinates"
+            return boxes, ""
+        except Exception as e:
+            return empty, f"{path}: ignoring false-positive label file: {e}"
+
+    def update_labels_info(self, label: Dict) -> Dict:
+        """Append the image's false-positive boxes to its boxes as class PRESENCE_FP_CLS, then build its instances."""
+        fp = label.pop("fp_bboxes", None)
+        if fp is not None and len(fp):
+            label["cls"] = np.concatenate([label["cls"], np.full((len(fp), 1), PRESENCE_FP_CLS, dtype=np.float32)])
+            label["bboxes"] = np.concatenate([label["bboxes"], fp])
+            label["segments"] = []  # boxes only: segments would have to match the boxes one to one
+        return super().update_labels_info(label)
 
 
 class YOLOMultiModalDataset(YOLODataset):

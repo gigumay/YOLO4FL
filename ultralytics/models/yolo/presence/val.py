@@ -1,5 +1,7 @@
 # Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
 
+import math
+from pathlib import Path
 from typing import Any, Dict, List
 
 import cv2
@@ -9,7 +11,7 @@ import torch
 from ultralytics.models.yolo.detect import DetectionValidator
 from ultralytics.utils import LOGGER
 from ultralytics.utils.metrics import PresenceMetrics
-from ultralytics.utils.plotting import overlay_heatmap
+from ultralytics.utils.plotting import overlay_heatmap, plot_images
 from ultralytics.utils.tal import fuse_presence_logits, presence_batch_targets
 
 
@@ -62,6 +64,8 @@ class PresenceValidator(DetectionValidator):
         Accumulate the predictions of a batch with its presence targets.
 
         During training the loss has already built the targets of this batch, and they are reused from the batch.
+        False-positive regions (class -1, see PresenceDataset) are not targets and not counted as instances; their
+        weight `pres_fp_weight` only matters to the loss, and is passed here so that the cached targets match.
         """
         logits = preds["logits"]
         bs, _, h, _ = batch["img"].shape
@@ -75,13 +79,15 @@ class PresenceValidator(DetectionValidator):
             self.nc,
             self.args.pres_tau,
             self.args.pres_inst_pow,
+            fp_weight=self.args.pres_fp_weight,
             device=logits[0].device,
         )
         fused = fuse_presence_logits(logits)
-        preds["fused"] = fused.sigmoid()  # for the plots
-        self.metrics.update(logits, targets, [w > 0 for w in weights], fused, strides)
+        valid = [w > 0 for w in weights]
+        preds.update(fused=fused.sigmoid(), targets=targets, valid=valid)  # for the plots
+        self.metrics.update(logits, targets, valid, fused, strides)
         self.seen += bs
-        self.nt += len(batch["cls"])
+        self.nt += int((batch["cls"] >= 0).sum())  # labelled animals only, not false-positive regions
 
     def finalize_metrics(self) -> None:
         """Attach speed and save directory to the metrics."""
@@ -105,25 +111,75 @@ class PresenceValidator(DetectionValidator):
         if self.nt == 0:
             LOGGER.warning(f"no labels found in {self.args.task} set, can not compute metrics without labels")
 
+    @staticmethod
+    def most_accurate_map(
+        probs: List[torch.Tensor], targets: List[torch.Tensor], valid: List[torch.Tensor]
+    ) -> torch.Tensor:
+        """
+        Return, for each image, the index of the score map that best matches its targets.
+
+        On an image with labels, the best map has the highest soft F1 over the scored cells: precision and recall
+        computed with the scores p in place of 0/1 flags, i.e. F1 = 2 * sum(p * t) / (sum(p) + sum(t)). It rewards
+        high scores on the positive cells and penalises score anywhere else, relative to the size of the animals
+        rather than of the image, and needs no threshold. On an image without labels every map has an F1 of 0, and
+        the best map is the one with the lowest mean score, i.e. the least false alarm per image area.
+
+        Args:
+            probs (List[torch.Tensor]): Candidate score maps, each (B, nc, h, w) with values in [0, 1].
+            targets (List[torch.Tensor]): 0/1 targets of each map, same shapes.
+            valid (List[torch.Tensor]): Boolean masks of the cells to score in each map, same shapes.
+
+        Returns:
+            (torch.Tensor): Index into `probs` of the best map of each image, shape (B,).
+        """
+        f1, mean, npos = [], [], []
+        for p, t, v in zip(probs, targets, valid):
+            p, t, v = (x.flatten(1).float() for x in (p, t, v))
+            sp, st = (p * v).sum(1), (t * v).sum(1)
+            f1.append(2 * (p * t * v).sum(1) / (sp + st).clamp(min=1e-9))
+            mean.append(sp / v.sum(1).clamp(min=1))
+            npos.append(st)
+        labelled = (torch.stack(npos, 1) > 0).any(1, keepdim=True)
+        return torch.where(labelled, torch.stack(f1, 1), -torch.stack(mean, 1)).argmax(1)
+
+    def plot_val_samples(self, batch: Dict[str, Any], ni: int) -> None:
+        """Do nothing: plot_predictions draws the labels, as heatmaps of the level it shows for each image."""
+
     def plot_predictions(self, batch: Dict[str, Any], preds: Dict[str, List[torch.Tensor]], ni: int) -> None:
         """
-        Save heatmap overlays for the first images of a batch: one row per image, one panel per level plus the fused
-        map, each blended over the network input image.
+        Save heatmap mosaics of the first 16 images of a batch, one tile per image, blended over the network input.
+
+        val_batch{ni}_pred.jpg shows, for each image, only the most accurate of its level maps and the fused map (see
+        `most_accurate_map`), and val_batch{ni}_labels.jpg the targets of that same level, so the two mosaics compare
+        tile by tile. The fused map is scored against, and shown with, the targets of the finest level, as in the
+        metrics. Target cells are drawn at 1 if positive, 0 if negative, and 0.5 if ignored (not scored). Each tile is
+        captioned with the level shown and the image file name.
         """
+        probs = preds["probs"] + [preds["fused"]]
+        finest = max(range(len(preds["probs"])), key=lambda i: probs[i].shape[-2] * probs[i].shape[-1])
+        targets = preds["targets"] + [preds["targets"][finest]]
+        valid = preds["valid"] + [preds["valid"][finest]]
         names = [f"P{int(np.log2(batch['img'].shape[2] / p.shape[2]))}" for p in preds["probs"]] + ["fused"]
-        maps = preds["probs"] + [preds["fused"]]
-        rows = []
-        for i in range(min(len(batch["img"]), 8)):
-            img = (batch["img"][i].float().permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)[..., ::-1]  # BGR
-            scale = 320 / max(img.shape[:2])
-            img = cv2.resize(img, (round(img.shape[1] * scale), round(img.shape[0] * scale)))
-            panels = []
-            for name, m in zip(names, maps):
-                panel = overlay_heatmap(img, m[i].amax(0))  # max over classes
-                cv2.putText(panel, name, (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2, cv2.LINE_AA)
-                panels.append(panel)
-            rows.append(np.hstack(panels))
-        fname = self.save_dir / f"val_batch{ni}_pred.jpg"
-        cv2.imwrite(str(fname), np.vstack(rows))
-        if self.on_plot:
-            self.on_plot(fname)
+
+        n = min(len(batch["img"]), 16)  # plot_images shows at most 16 images
+        best = self.most_accurate_map([x[:n] for x in probs], [x[:n] for x in targets], [x[:n] for x in valid])
+        best = best.tolist()
+        h, w = batch["img"].shape[2:]
+        scale = min(1.0, 1920 / math.ceil(n**0.5) / max(h, w))  # tile size in plot_images' 1920 px mosaic
+        pred_tiles, label_tiles = [], []
+        for i, k in enumerate(best):
+            img = (batch["img"][i, :3].float().permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)[..., ::-1]  # BGR
+            if scale < 1:
+                img = cv2.resize(img, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+            gt = targets[k][i].float() + 0.5 * (~valid[k][i]).float()  # 1 positive, 0.5 ignored, 0 negative
+            pred_tiles.append(overlay_heatmap(img, probs[k][i].amax(0)))  # max over classes
+            label_tiles.append(overlay_heatmap(img, gt.amax(0)))
+        captions = [f"{names[k]} | {Path(f).name}" for k, f in zip(best, batch["im_file"])]
+        for kind, tiles in (("labels", label_tiles), ("pred", pred_tiles)):
+            plot_images(
+                labels={},
+                images=np.stack(tiles)[..., ::-1].transpose(0, 3, 1, 2).astype(np.float32) / 255,  # RGB CHW in [0, 1]
+                paths=captions,
+                fname=self.save_dir / f"val_batch{ni}_{kind}.jpg",
+                on_plot=self.on_plot,
+            )
